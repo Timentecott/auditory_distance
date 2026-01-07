@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+*.egg-info/
+dist/
+build/
+
+# Results and data
+results/*.csv
+*.csv
+
+# IDE
+.vs/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Audio files (if large)
+# Uncomment if you don't want to push audio files:
+# *.wav
+# *.flac
+# *.mp3
+# *.aiff
+# *.ogg
+
+# OS
+.DS_Store
+Thumbs.db
