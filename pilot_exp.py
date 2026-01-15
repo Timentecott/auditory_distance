@@ -59,6 +59,12 @@ for stim_type in stimulus_types:
     speaker_stimuli[stim_type] = _list_audio(os.path.join(speaker_dir, stim_type))
     print(f"Loaded {len(headphone_stimuli[stim_type])} headphone {stim_type} stimuli")
     print(f"Loaded {len(speaker_stimuli[stim_type])} speaker {stim_type} stimuli")
+    
+    # Check for empty stimulus lists
+    if len(headphone_stimuli[stim_type]) == 0:
+        print(f"  ⚠ WARNING: No headphone {stim_type} files found in {os.path.join(headphone_dir, stim_type)}")
+    if len(speaker_stimuli[stim_type]) == 0:
+        print(f"  ⚠ WARNING: No speaker {stim_type} files found in {os.path.join(speaker_dir, stim_type)}")
 
 
 #interstimulus interval
@@ -166,7 +172,7 @@ win.flip()
 event.waitKeys()
 
 # Clear screen
-win.flip()
+win.flip();
 
 
 ##trial structure:
@@ -179,40 +185,47 @@ core.wait(ISI)  # Wait for interstimulus interval
 #play a headphone or speaker stimulus at random. Record decision 
 # if headphone, play via headphones, if speaker, play via speakers
 
-# Audio device indices (adjust these for your setup)
+# Audio device indices (adjust these)
 headphones_device = 13  # Device index for headphones
 speakers_device = 11  # Device index for speakers
 
 
 #repeat for x trials. each new trial should be on a new row in the results table
 # Run trials in 3 blocks with breaks
-practice_trials = 3
-block1trials = 4
-block2trials = 4
-block3trials = 4
-total_trials = block1trials + block2trials + block3trials
+practice_trials = 0
 
-# Create randomized trial order:
-# 1. Half headphone, half speaker
-trial_types = ['headphone'] * (total_trials // 2) + ['speaker'] * (total_trials // 2)
-random.shuffle(trial_types)
+# Generate balanced trial list: 90 trials, 3 blocks, 30 trials per block
+number_of_trials = 6
+number_of_blocks = 3
+trials_per_block_count = number_of_trials // number_of_blocks
+trial_list = []
 
-# 2. Equal distribution of stimulus types (environment, ISTS, noise)
-stim_types_per_trial = [stim_type for stim_type in stimulus_types for _ in range(total_trials // len(stimulus_types))]
-random.shuffle(stim_types_per_trial)
+# Trial list format: [output, stim_type]
+# output: 0 = speakers, 1 = headphones
+# stim_type: 0 = noise, 1 = ISTS, 2 = environment
+for output in [0, 1]:  # 0 = speakers, 1 = headphones
+    for stim_type in [0, 1, 2]:  # 0 = noise, 1 = ISTS, 2 = environment
+        trials_per_combination = number_of_trials // 6  # 90 / 6 = 15
+        for _ in range(trials_per_combination):
+            trial_list.append([output, stim_type])
 
-# 3. Combine into trial list: (playback_type, stimulus_type)
-trial_list = list(zip(trial_types, stim_types_per_trial))
+# Shuffle the trial list
+random.shuffle(trial_list)
+
+# Map numeric codes to string labels
+output_map = {0: 'speaker', 1: 'headphone'}
+stim_type_map = {0: 'noise', 1: 'ISTS', 2: 'environment'}
 
 print(f"\nTrial configuration:")
-print(f"  Total trials: {total_trials}")
-print(f"  Headphone trials: {sum(1 for t in trial_types if t == 'headphone')}")
-print(f"  Speaker trials: {sum(1 for t in trial_types if t == 'speaker')}")
-for stim_type in stimulus_types:
-    print(f"  {stim_type.capitalize()} trials: {sum(1 for t in stim_types_per_trial if t == stim_type)}")
+print(f"  Total trials: {number_of_trials}")
+print(f"  Blocks: {number_of_blocks}")
+print(f"  Trials per block: {trials_per_block_count}")
+print(f"  Headphone trials: {sum(1 for t in trial_list if t[0] == 1)}")
+print(f"  Speaker trials: {sum(1 for t in trial_list if t[0] == 0)}")
+for stim_code, stim_name in stim_type_map.items():
+    print(f"  {stim_name.capitalize()} trials: {sum(1 for t in trial_list if t[1] == stim_code)}")
 print()
 
-trials_per_block = [block1trials, block2trials, block3trials]
 trial_counter = 0
 
 # --- Practice trials ---
@@ -309,16 +322,18 @@ for p in range(practice_trials):
 
 # --- End practice trials ---
 
-for block in range(3):
-    for i in range(trials_per_block[block]):
+for block in range(number_of_blocks):
+    for i in range(trials_per_block_count):
         trial_num = trial_counter
         
         fixation.draw()
         win.flip()
         core.wait(ISI)
         
-        # Get trial configuration: (playback_type, stimulus_type)
-        playback_type, stim_category = trial_list[trial_counter]
+        # Get trial configuration: [output, stim_type]
+        output_code, stim_type_code = trial_list[trial_counter]
+        playback_type = output_map[output_code]
+        stim_category = stim_type_map[stim_type_code]
         trial_counter += 1
         
         if playback_type == 'headphone':
@@ -343,9 +358,7 @@ for block in range(3):
             # Apply safety limiter to prevent dangerously loud playback
             audio_5s = apply_safety_limit(audio_5s)
 
-            # Force mono to avoid channel/device mismatches
-            if audio_5s.ndim > 1:
-                audio_5s = audio_5s.mean(axis=1)
+
 
             # Explicitly set output device (leave input as default)
             sd.default.device = (None, device)
@@ -396,26 +409,13 @@ for block in range(3):
         append_result(playback_type, stimulus, response, rt, accuracy, stimulus_category=stim_category)
     
     # Display break message after each block (except the last)
-    if block < 2:
-        if block == 0:
-            break_msg = visual.TextStim(win, text="You're 1/3 of the way through.\n\nTake a break.\n\nPress any key to continue.", color='white', height=30)
-        else:
-            break_msg = visual.TextStim(win, text="You're 2/3 of the way through.\n\nTake a break.\n\nPress any key to continue.", color='white', height=30)
+    if block < (number_of_blocks - 1):
+        break_msg = visual.TextStim(
+            win, 
+            text=f"You're {block + 1}/{number_of_blocks} of the way through.\n\nTake a break.\n\nPress any key to continue.", 
+            color='white', 
+            height=30
+        )
         break_msg.draw()
         win.flip()
         event.waitKeys()
-
-#at end of experiment, save results table as a csv file wigth participant ID and timestamp in filename
-#display "thank you for participating!"
-
-
-
-
-# Close the window
-win.close()
-print(results)
-#save results to csv with in results folder participant ID as filename
-results_filename = f"results/{participant_id}.csv"
-results.to_csv(results_filename, index=False)   
-print(f"Results saved to {results_filename}")
-core.quit()
