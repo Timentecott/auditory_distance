@@ -306,8 +306,8 @@ def main():
     
     # file locations
     script_dir = Path(__file__).resolve().parent
-    input_folder = script_dir / "loudspeaker_stimuli"
-    output_folder = script_dir / "localised_stimuli"
+    input_folder = script_dir / "original_audios/noise"
+    output_folder = script_dir / "localised_stimuli/noise"
     
     # Localization parameters
     azimuth = -45.0  # degrees

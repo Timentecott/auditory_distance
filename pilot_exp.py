@@ -9,7 +9,7 @@ import os, glob
 
 
 # Safety limiter for dangerous sound levels
-MAX_SPL_DB = 85  # Maximum SPL in dB (85 dB is OSHA safe limit for 8 hours)
+MAX_SPL_DB = 95  # Maximum SPL in dB (85 dB is OSHA safe limit for 8 hours)
 # Assuming standard calibration: 0 dBFS = 94 dB SPL
 # So max safe level = 94 - (94 - 85) = -9 dBFS
 MAX_DBFSsafe = -9.0
@@ -30,7 +30,7 @@ def apply_safety_limit(audio, max_amplitude=MAX_AMP_LINEAR):
     if current_max > max_amplitude:
         scaling_factor = max_amplitude / current_max
         audio = audio * scaling_factor
-        print(f"  ⚠ Safety limiter engaged: reduced gain by {20 * np.log10(scaling_factor):.1f} dB")
+        print(f"  WARNING: Safety limiter engaged: reduced gain by {20 * np.log10(scaling_factor):.1f} dB")
     return audio
 
 
@@ -62,11 +62,11 @@ for stim_type in stimulus_types:
     
     # Check for empty stimulus lists
     if len(headphone_stimuli[stim_type]) == 0:
-        print(f"  ⚠ WARNING: No headphone {stim_type} files found in {os.path.join(headphone_dir, stim_type)}")
+        print(f"  WARNING: No headphone {stim_type} files found in {os.path.join(headphone_dir, stim_type)}")
     if len(speaker_stimuli[stim_type]) == 0:
-        print(f"  ⚠ WARNING: No speaker {stim_type} files found in {os.path.join(speaker_dir, stim_type)}")
+        print(f"  WARNING: No speaker {stim_type} files found in {os.path.join(speaker_dir, stim_type)}")
 
-
+           
 #interstimulus interval
 ISI = 1.0 #seconds
 
@@ -186,16 +186,16 @@ core.wait(ISI)  # Wait for interstimulus interval
 # if headphone, play via headphones, if speaker, play via speakers
 
 # Audio device indices (adjust these)
-headphones_device = 13  # Device index for headphones
-speakers_device = 11  # Device index for speakers
+headphones_device = 5  # Device index for headphones
+speakers_device = 4  # Device index for speakers
 
 
 #repeat for x trials. each new trial should be on a new row in the results table
 # Run trials in 3 blocks with breaks
-practice_trials = 0
+practice_trials = 3
 
-# Generate balanced trial list: 90 trials, 3 blocks, 30 trials per block
-number_of_trials = 6
+# Generate balanced trial list: 24 trials, 3 blocks, 8 trials per block
+number_of_trials = 24
 number_of_blocks = 3
 trials_per_block_count = number_of_trials // number_of_blocks
 trial_list = []
@@ -205,7 +205,7 @@ trial_list = []
 # stim_type: 0 = noise, 1 = ISTS, 2 = environment
 for output in [0, 1]:  # 0 = speakers, 1 = headphones
     for stim_type in [0, 1, 2]:  # 0 = noise, 1 = ISTS, 2 = environment
-        trials_per_combination = number_of_trials // 6  # 90 / 6 = 15
+        trials_per_combination = number_of_trials // 6  # 24 / 6 = 4
         for _ in range(trials_per_combination):
             trial_list.append([output, stim_type])
 
@@ -226,8 +226,6 @@ for stim_code, stim_name in stim_type_map.items():
     print(f"  {stim_name.capitalize()} trials: {sum(1 for t in trial_list if t[1] == stim_code)}")
 print()
 
-trial_counter = 0
-
 # --- Practice trials ---
 # Define response_prompt and img_path before practice trials
 response_prompt = visual.TextStim(
@@ -240,8 +238,6 @@ response_prompt = visual.TextStim(
 img_path = os.path.join(base_dir, 'resources', 'headphonevsloudspeak_info_graphic.png')
 
 for p in range(practice_trials):
-    trial_num = trial_counter
-
     fixation.draw()
     win.flip()
     core.wait(ISI)
@@ -271,7 +267,7 @@ for p in range(practice_trials):
             audio_5s = audio_5s.mean(axis=1)
 
         sd.default.device = (None, device)
-        print(f"Practice {trial_num}: {playback_type} via device {device} ({stim_category})")
+        print(f"Practice {p+1}/{practice_trials}: {playback_type} via device {device} ({stim_category})")
 
         fixation.draw()
         win.flip()
@@ -304,7 +300,6 @@ for p in range(practice_trials):
         response = keys[0]
     except Exception as e:
         print(f"Error playing practice stimulus {stimulus}: {e}")
-        trial_counter += 1
         continue
 
     if (response == 'up' and playback_type == 'speaker') or (response == 'down' and playback_type == 'headphone'):
@@ -318,23 +313,22 @@ for p in range(practice_trials):
     else:
         presentation_label = 'headphone(practice)'
     append_result(presentation_label, stimulus, response, rt, accuracy, stimulus_category=stim_category)
-    trial_counter += 1
 
 # --- End practice trials ---
 
+# --- Main experimental trials ---
+trial_index = 0  # Separate counter for indexing trial_list
+
 for block in range(number_of_blocks):
     for i in range(trials_per_block_count):
-        trial_num = trial_counter
-        
         fixation.draw()
         win.flip()
         core.wait(ISI)
         
         # Get trial configuration: [output, stim_type]
-        output_code, stim_type_code = trial_list[trial_counter]
+        output_code, stim_type_code = trial_list[trial_index]
         playback_type = output_map[output_code]
         stim_category = stim_type_map[stim_type_code]
-        trial_counter += 1
         
         if playback_type == 'headphone':
             stimulus = random.choice(headphone_stimuli[stim_category])
@@ -358,13 +352,11 @@ for block in range(number_of_blocks):
             # Apply safety limiter to prevent dangerously loud playback
             audio_5s = apply_safety_limit(audio_5s)
 
-
-
             # Explicitly set output device (leave input as default)
             sd.default.device = (None, device)
 
             # Debug: log routing
-            print(f"Trial {trial_num}: {playback_type} via device {device} ({stim_category})")
+            print(f"Trial {trial_index+1}/{number_of_trials}: {playback_type} via device {device} ({stim_category})")
             
             # Show fixation cross during audio playback
             fixation.draw()
@@ -399,6 +391,7 @@ for block in range(number_of_blocks):
             response = keys[0]
         except Exception as e:
             print(f"Error playing stimulus {stimulus}: {e}")
+            trial_index += 1  # Still increment to avoid getting stuck
             continue  # Skip this trial if error occurs
         
         if (response == 'up' and playback_type == 'speaker') or (response == 'down' and playback_type == 'headphone'):
@@ -407,6 +400,7 @@ for block in range(number_of_blocks):
             accuracy = 0
         
         append_result(playback_type, stimulus, response, rt, accuracy, stimulus_category=stim_category)
+        trial_index += 1  # Increment after successful trial
     
     # Display break message after each block (except the last)
     if block < (number_of_blocks - 1):
@@ -419,3 +413,7 @@ for block in range(number_of_blocks):
         break_msg.draw()
         win.flip()
         event.waitKeys()
+
+print("\nExperiment complete!")
+win.close()
+core.quit()
