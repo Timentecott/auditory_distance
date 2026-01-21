@@ -20,7 +20,7 @@ SAMPLE_RATE = 48000
 # Microphone sensitivity calibration
 # Adjust this based on your microphone calibration (dB re 1V/Pa)
 # For most measurement mics this is around -40 to -30 dBV/Pa
-MIC_SENSITIVITY_DBV_PA = -40.0  # Example: adjust for your microphone
+MIC_SENSITIVITY_DBV_PA = -46.0  # 46 for charlotte's mic
 
 def generate_calibration_tone(freq=CALIBRATION_FREQ, duration=DURATION, fs=SAMPLE_RATE, amplitude=0.1):
     """Generate a sine wave calibration tone."""

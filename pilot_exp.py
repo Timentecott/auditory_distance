@@ -95,7 +95,7 @@ def append_result(presentation_type, stimulus, response, rt, accuracy, stimulus_
         'rt': rt,
         'accuracy': accuracy,
         'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
-    }
+    }  
     # Persist after each trial so practice trials are saved
     pid = globals().get('participant_id')
     fname = os.path.join(results_dir, f"{pid}.csv" if pid else "temp_results.csv")
@@ -159,7 +159,7 @@ Your task is to identify whether the sound is played through headphones or louds
 
 Press the UP ARROW key for loudspeakers and the DOWN ARROW key for headphones.
 
-Try to respond as quickly and accurately as possible.
+Try to respond as quickly and accurately as possible, you can respond while the audio is still playing.
 
 Press any key to begin."""
 
@@ -187,15 +187,15 @@ core.wait(ISI)  # Wait for interstimulus interval
 
 # Audio device indices (adjust these)
 headphones_device = 5  # Device index for headphones
-speakers_device = 4  # Device index for speakers
+speakers_device = 6  # Device index for speakers
 
 
 #repeat for x trials. each new trial should be on a new row in the results table
 # Run trials in 3 blocks with breaks
 practice_trials = 3
 
-# Generate balanced trial list: 24 trials, 3 blocks, 8 trials per block
-number_of_trials = 24
+# Generate balanced trial list: 18 trials, 3 blocks, 6 trials per block
+number_of_trials = 18
 number_of_blocks = 3
 trials_per_block_count = number_of_trials // number_of_blocks
 trial_list = []
@@ -205,7 +205,7 @@ trial_list = []
 # stim_type: 0 = noise, 1 = ISTS, 2 = environment
 for output in [0, 1]:  # 0 = speakers, 1 = headphones
     for stim_type in [0, 1, 2]:  # 0 = noise, 1 = ISTS, 2 = environment
-        trials_per_combination = number_of_trials // 6  # 24 / 6 = 4
+        trials_per_combination = number_of_trials // 6  # 18 / 6 = 3
         for _ in range(trials_per_combination):
             trial_list.append([output, stim_type])
 
@@ -236,6 +236,17 @@ response_prompt = visual.TextStim(
     pos=(0, 150)
 )
 img_path = os.path.join(base_dir, 'resources', 'headphonevsloudspeak_info_graphic.png')
+
+# Create info_image once outside the loop for efficiency
+if os.path.exists(img_path):
+    info_image = visual.ImageStim(
+        win,
+        image=img_path,
+        pos=(0, -100),
+        size=(800, 400)
+    )
+else:
+    info_image = None
 
 for p in range(practice_trials):
     fixation.draw()
@@ -269,37 +280,31 @@ for p in range(practice_trials):
         sd.default.device = (None, device)
         print(f"Practice {p+1}/{practice_trials}: {playback_type} via device {device} ({stim_category})")
 
-        fixation.draw()
-        win.flip()
-
-        sd.play(audio_5s, samplerate=fs, device=device)
-        sd.wait()
-
-        # Create info_image in practice loop to avoid NameError
-        if os.path.exists(img_path):
-            info_image = visual.ImageStim(
-                win,
-                image=img_path,
-                pos=(0, -100),
-                size=(800, 400)
-            )
-        else:
-            info_image = None
-
+        # Show response prompt and image BEFORE starting audio
         response_prompt.draw()
         if info_image:
             info_image.draw()
         win.flip()
 
+        # START AUDIO PLAYBACK (non-blocking) and start timing immediately
+        sd.play(audio_5s, samplerate=fs, device=device)
         start_time = time.time()
+        
+        # Wait for response while audio is playing
         keys = event.waitKeys(keyList=['up', 'down', 'escape'])
         rt = time.time() - start_time
+        
+        # Stop audio if response comes before audio finishes
+        sd.stop()
+        
         if 'escape' in keys:
             win.close()
             core.quit()
         response = keys[0]
+        
     except Exception as e:
         print(f"Error playing practice stimulus {stimulus}: {e}")
+        sd.stop()  # Ensure audio is stopped on error
         continue
 
     if (response == 'up' and playback_type == 'speaker') or (response == 'down' and playback_type == 'headphone'):
@@ -358,39 +363,32 @@ for block in range(number_of_blocks):
             # Debug: log routing
             print(f"Trial {trial_index+1}/{number_of_trials}: {playback_type} via device {device} ({stim_category})")
             
-            # Show fixation cross during audio playback
-            fixation.draw()
-            win.flip()
-            
-            # Play audio and wait for completion
-            sd.play(audio_5s, samplerate=fs, device=device)
-            playback_duration = len(audio_5s) / fs
-            sd.wait()  # Block until audio finishes playing
-            
-            # After audio finishes, display response prompt with image
+            # Show response prompt and image BEFORE starting audio
             response_prompt.draw()
-            if os.path.exists(img_path):
-                info_image = visual.ImageStim(
-                    win,
-                    image=img_path,
-                    pos=(0, -100),
-                    size=(800, 400)
-                )
+            if info_image:
                 info_image.draw()
             win.flip()
             
-            # Start timing for response collection (after audio finished)
+            # Start audio playback (non-blocking) and start timing immediately
+            sd.play(audio_5s, samplerate=fs, device=device)
             start_time = time.time()
+            
+            # Wait for response while audio is playing
             keys = event.waitKeys(keyList=['up', 'down', 'escape'])
             rt = time.time() - start_time
+            
+            # Stop audio if response comes before audio finishes
+            sd.stop()
             
             if 'escape' in keys:
                 win.close()
                 core.quit()
             
             response = keys[0]
+            
         except Exception as e:
             print(f"Error playing stimulus {stimulus}: {e}")
+            sd.stop()  # Ensure audio is stopped on error
             trial_index += 1  # Still increment to avoid getting stuck
             continue  # Skip this trial if error occurs
         
