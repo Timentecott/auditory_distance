@@ -24,12 +24,12 @@ results/*.csv
 
 # Audio files (if large)
 # Uncomment if you don't want to push audio files:
-# *.wav
-# *.flac
-# *.mp3
-# *.aiff
-# *.ogg
-
+*.wav
+ *.flac
+ *.mp3
+ *.aiff
+ *.ogg
+*.sofa
 # OS
 .DS_Store
 Thumbs.db
