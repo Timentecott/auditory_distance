@@ -282,7 +282,13 @@ Please keep your head as still as possible and look at the fixation cross throug
 
 Press any key to begin."""
 
-instructions = visual.TextStim(win, text=instructions_text, color='white', height=30)
+instructions = visual.TextStim(
+    win, 
+    text=instructions_text, 
+    color='white', 
+    height=30,
+    wrapWidth=1100  # Add this to make lines wider (fewer wraps)
+)
 instructions.draw()
 win.flip()
 
@@ -348,8 +354,8 @@ if os.path.exists(img_path):
     info_image = visual.ImageStim(
         win,
         image=img_path,
-        pos=(0, -280),  # Position near bottom of screen
-        size=(800, 400)
+        pos=(0, -150),  # Changed from -280 to -150 (higher on screen)
+        size=(400, 200)
     )
 else:
     info_image = None
@@ -378,7 +384,7 @@ for p in range(practice_trials):
         audio_data, fs = sf.read(stimulus)
         samples_5s = int(5 * fs)
         audio_5s = audio_data[:samples_5s]
-        gain_db = random.uniform(-5, 5)
+        gain_db = random.uniform(-2, 2)
         gain_linear = 10 ** (gain_db / 20)
         audio_5s = audio_5s * gain_linear
         audio_5s = apply_safety_limit(audio_5s)
@@ -477,7 +483,7 @@ for block in range(number_of_blocks):
             samples_5s = int(5 * fs)
             audio_5s = audio_data[:samples_5s]
             # Apply random gain between -5 and +5 dB
-            gain_db = random.uniform(-5 , 5)
+            gain_db = random.uniform(-2 , 2)
             gain_linear = 10 ** (gain_db / 20)
             audio_5s = audio_5s * gain_linear
             
