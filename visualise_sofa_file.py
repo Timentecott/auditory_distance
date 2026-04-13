@@ -13,7 +13,7 @@ import pyfar as pf
 # ============================================================================
 
 # Input SOFA file
-SOFA_FILE = r'C:\Users\tim_e\source\repos\auditory_distance\resources\sofa_files\BRIRs_from_a_room\A\002.sofa' #a02 is 1m from the sound source
+SOFA_FILE = r'C:\Users\tim_e\source\repos\auditory_distance\resources\sofa_files\360-BRIR-FOAIR-database\Binaural\SOFA\C4m.sofa' #a02 is 1m from the sound source
 
 # Visualization settings
 SHOW_METADATA = True        # Display SOFA file metadata

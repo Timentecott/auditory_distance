@@ -1,3 +1,8 @@
+## to do: 
+# create a working safety limter
+# a method of equalising sound levels across headphones and speakers
+# improve stimuli
+
 from psychopy import visual, event, core
 import pandas as pd
 import time
