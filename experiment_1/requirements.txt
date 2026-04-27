@@ -1,0 +1,6 @@
+numpy
+pandas
+sounddevice
+soundfile
+psychopy
+scipy

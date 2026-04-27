@@ -1,0 +1,7 @@
+numpy
+pandas
+psychopy
+sounddevice
+soundfile
+pyfar
+sofar
