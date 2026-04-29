@@ -11,8 +11,8 @@ import soundfile as sf
 import os, glob
 
 # Audio device indices (adjust these!!)
-headphones_device = 4  # Device index for headphones
-speakers_device = 3  # Device index for speakers
+headphones_device = 25  # Device index for headphones
+speakers_device = 5  # Device index for speakers
 
 
 # Safety limiter for dangerous sound levels - this is not currently applied 
@@ -619,18 +619,6 @@ for block in range(number_of_blocks):
                     if keys:
                         if 'escape' in keys:
                             sd.stop()
-                            win.close()
-                            core.quit()
-                        if 'up' in keys:
-                            response = 'up'
-                            rt = elapsed_time
-                            response_message = "response recorded - loudspeaker"
-                        elif 'down' in keys:
-                            response = 'down'
-                            rt = elapsed_time
-                            response_message = "response recorded - headphone"
-                elif not image_shown:
-                    # Clear any key presses before 3 seconds (ignore them)
                             win.close()
                             core.quit()
                         if 'up' in keys:

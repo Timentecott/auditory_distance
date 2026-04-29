@@ -1,5 +1,7 @@
-from psychopy import visual, event, core, sound
+from psychopy import visual, event, core
 from psychopy.hardware import keyboard
+import sounddevice as sd
+import soundfile as sf
 import pandas as pd
 import numpy as np
 import random
@@ -13,6 +15,8 @@ CUE_TO_DOT_ISI = 0.1  # 100ms
 DOT_DURATION = 0.1  # 100ms
 INTER_TRIAL_INTERVAL = 1.0  # seconds
 RESPONSE_TIMEOUT = 3.0  # Maximum time to wait for response in seconds
+# Set to an integer output device index (from check_input_output_index.py output list).
+AUDIO_OUTPUT_DEVICE_INDEX = 4
 
 # Screen coordinates for locations
 DISTANCE_FROM_CENTER = 200  # pixels
@@ -29,6 +33,34 @@ audio_dir = os.path.join(base_dir, 'audio_stimuli', 'Localised')
 soundfile = 'pink_noise_48k_30s_300_8000hz'
 
 START_KEYS = {'num_5', 'num5', 'kp_5', 'numpad5', '5', 'clear'}
+
+# Accept both arrow keys and common numpad key names across keyboards/backends.
+RESPONSE_KEY_MAP = {
+    'left': 'left',
+    'right': 'right',
+    'up': 'up',
+    'down': 'down',
+    'num_4': 'left',
+    'num4': 'left',
+    'kp_4': 'left',
+    'numpad4': 'left',
+    '4': 'left',
+    'num_6': 'right',
+    'num6': 'right',
+    'kp_6': 'right',
+    'numpad6': 'right',
+    '6': 'right',
+    'num_8': 'up',
+    'num8': 'up',
+    'kp_8': 'up',
+    'numpad8': 'up',
+    '8': 'up',
+    'num_2': 'down',
+    'num2': 'down',
+    'kp_2': 'down',
+    'numpad2': 'down',
+    '2': 'down',
+}
 
 
 def wait_for_start_key():
@@ -57,6 +89,35 @@ def wait_for_start_key():
         core.wait(0.01)
 
 
+def get_direction_response():
+    """Return canonical direction ('left'/'right'/'up'/'down') or 'escape'."""
+    key_names = []
+
+    kb_keys = kb.getKeys(waitRelease=False, clear=True)
+    key_names.extend([str(k.name).strip().lower() for k in kb_keys])
+
+    event_keys = event.getKeys()
+    key_names.extend([str(k).strip().lower() for k in event_keys])
+
+    for key in key_names:
+        if key == 'escape':
+            return 'escape'
+        mapped = RESPONSE_KEY_MAP.get(key)
+        if mapped:
+            return mapped
+
+    return None
+
+
+def play_cue(location_name):
+    """Play a cue briefly using sounddevice on the configured output device."""
+    cue_audio, cue_sr = cue_sounds[location_name]
+    sd.stop()
+    sd.play(cue_audio, samplerate=cue_sr, device=AUDIO_OUTPUT_DEVICE_INDEX)
+    core.wait(SOUND_CUE_DURATION)
+    sd.stop()
+
+
 # Create PsychoPy window
 win = visual.Window(
     size=[1920, 1080],
@@ -66,6 +127,15 @@ win = visual.Window(
 )
 win.mouseVisible = False
 kb = keyboard.Keyboard()
+
+# Preload cue sounds once to reduce onset latency during trials.
+cue_sounds = {}
+for loc in LOCATIONS:
+    cue_path = os.path.join(audio_dir, f'{soundfile}_{loc}.wav')
+    if not os.path.exists(cue_path):
+        raise FileNotFoundError(f"Missing audio cue file: {cue_path}")
+    cue_audio, cue_sr = sf.read(cue_path, dtype='float32')
+    cue_sounds[loc] = (cue_audio, cue_sr)
 
 # Create visual stimuli
 fixation = visual.ShapeStim(
@@ -143,12 +213,7 @@ for practice_trial in practice_trials:
     core.wait(FIXATION_DURATION)
 
     sound_file = f'{soundfile}_{sound_location}.wav'
-    sound_path = os.path.join(audio_dir, sound_file)
-
-    trial_sound = sound.Sound(sound_path)
-    trial_sound.play()
-    core.wait(SOUND_CUE_DURATION)
-    trial_sound.stop()
+    play_cue(sound_location)
 
     win.flip()
     core.wait(CUE_TO_DOT_ISI)
@@ -160,11 +225,12 @@ for practice_trial in practice_trials:
 
     win.flip()
 
+    event.clearEvents()
+    kb.clearEvents()
+
     response = None
     while response is None:
-        keys = event.getKeys(keyList=['left', 'right', 'up', 'down', 'escape'])
-        if keys:
-            response = keys[0]
+        response = get_direction_response()
 
     if response == 'escape':
         win.close()
@@ -246,12 +312,7 @@ for trial_num in range(NUMBER_OF_TRIALS):
     
     # Load and play sound cue (only SOUND_CUE_DURATION)
     sound_file = f'{soundfile}_{sound_location}.wav'
-    sound_path = os.path.join(audio_dir, sound_file)
-
-    trial_sound = sound.Sound(sound_path)
-    trial_sound.play()
-    core.wait(SOUND_CUE_DURATION)
-    trial_sound.stop()
+    play_cue(sound_location)
 
     # Cue-to-target ISI
     win.flip()
@@ -269,14 +330,15 @@ for trial_num in range(NUMBER_OF_TRIALS):
 
     # Record response start time
     response_start = core.getTime()
+    event.clearEvents()
+    kb.clearEvents()
     response = None
     response_time = None
 
     # Wait for arrow key response (do not advance trial until a response is made)
     while response is None:
-        keys = event.getKeys(keyList=['left', 'right', 'up', 'down', 'escape'])
-        if keys:
-            response = keys[0]
+        response = get_direction_response()
+        if response is not None:
             response_time = core.getTime() - response_start
 
     # Check if response was correct
@@ -327,6 +389,7 @@ win.flip()
 core.wait(2)
 
 # Cleanup
+sd.stop()
 win.close()
 core.quit()
 

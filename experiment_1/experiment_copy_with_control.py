@@ -12,42 +12,7 @@ from pathlib import Path
 from scipy import signal
 import threading
 
-from equal_loudness_function import apply_equal_loudness_to_audio
-
-PERSONAL_EQ_FILE = Path(r"C:\Users\tim_e\Documents\DgSonicFocus\Person1\headphone1_response.txt")
-
-
-def apply_personal_headphone_eq(audio, sample_rate):
-    if not PERSONAL_EQ_FILE.exists():
-        raise FileNotFoundError(f"Personal EQ file not found: {PERSONAL_EQ_FILE}")
-    return apply_equal_loudness_to_audio(audio, sample_rate, PERSONAL_EQ_FILE)
-
-
-# Safety limiter for dangerous sound levels
-MAX_SPL_DB = 120  # Maximum SPL in dB (85 dB is OSHA safe limit for 8 hours)
-# Assuming standard calibration: 0 dBFS = 94 dB SPL
-# So max safe level = 94 - (94 - 85) = -9 dBFS
-MAX_DBFSsafe = -9.0
-MAX_AMP_LINEAR = 10 ** (MAX_DBFSsafe / 20.0)
-
-
-def apply_safety_limit(audio, max_amplitude=MAX_AMP_LINEAR):
-    """
-    Apply a hard limiter to prevent dangerously loud playback.
-    
-    Args:
-        audio: Audio array
-        max_amplitude: Maximum allowed amplitude (default -9 dBFS ≈ 85 dB SPL)
-    
-    Returns:
-        Limited audio array
-    """
-    current_max = np.max(np.abs(audio))
-    if current_max > max_amplitude:
-        scaling_factor = max_amplitude / current_max
-        audio = audio * scaling_factor
-        print(f"  WARNING: Safety limiter engaged: reduced gain by {20 * np.log10(scaling_factor):.1f} dB")
-    return audio
+# Personal EQ is disabled for now because there is no local EQ file available.
 
 
 def apply_fade(audio, sample_rate, fade_ms=10):
@@ -86,6 +51,12 @@ def append_silence_tail(audio, sample_rate, tail_ms=20):
     else:
         tail = np.zeros((tail_samples, audio.shape[1]), dtype=audio.dtype)
     return np.concatenate([audio, tail], axis=0)
+
+
+def play_audio_on_stream(audio, stream):
+    """Play a block of audio through an already-open output stream."""
+    audio = np.asarray(audio, dtype=np.float32)
+    stream.write(audio)
 
 
 def apply_gain_db(audio, gain_db):
@@ -206,14 +177,8 @@ def run_loudness_calibration(win, headphones_device, speakers_device, sample_rat
     reference_audio = rng.standard_normal(int(sample_rate * duration_s)).astype(np.float32)
     reference_audio = reference_audio / np.max(np.abs(reference_audio)) * 0.5
 
-    # Precompute EQ'd headphone reference once (more stable and avoids repeated file IO in thread)
-    try:
-        reference_headphone_eq = apply_personal_headphone_eq(
-            ensure_stereo(reference_audio), sample_rate
-        ).astype(np.float32)
-    except Exception as e:
-        print(f"WARNING: Headphone EQ unavailable during calibration ({e}). Using un-EQ'd reference.")
-        reference_headphone_eq = ensure_stereo(reference_audio).astype(np.float32)
+    # Personal EQ is disabled, so use the raw reference audio.
+    reference_headphone_eq = ensure_stereo(reference_audio).astype(np.float32)
 
     headphone_offset_db = 0.0
     step_db = 1.0
@@ -409,10 +374,38 @@ def run_loudness_calibration(win, headphones_device, speakers_device, sample_rat
     print(f"\nCalibration log: {calibration_log}")
     return headphone_offset_db, 0.0
 
-#load headphone stimuli from /localised_stimuli
+
+def create_playback_streams(headphones_device, speakers_device, sample_rate):
+    """Open persistent playback streams for headphone and speaker output."""
+    speaker_stream = sd.OutputStream(
+        samplerate=sample_rate,
+        channels=2,
+        dtype='float32',
+        latency='low',
+        device=speakers_device,
+    )
+    headphone_stream = sd.OutputStream(
+        samplerate=sample_rate,
+        channels=2,
+        dtype='float32',
+        latency='low',
+        device=headphones_device,
+    )
+    speaker_stream.start()
+    headphone_stream.start()
+    return speaker_stream, headphone_stream
+
 base_dir = os.path.dirname(__file__) if '__file__' in globals() else os.getcwd()
-headphone_dir = os.path.join(base_dir, 'localised_stimuli_b20')
-speaker_dir = os.path.join(base_dir, 'loudspeaker_stimuli')
+headphone_root_candidates = [
+    os.path.join(base_dir, 'normalised_localised'),
+    os.path.join(base_dir, 'localised_stimuli_B20'),
+    os.path.join(base_dir, 'localised_stimuli_b20'),
+    os.path.join(base_dir, 'localised_stimuli'),
+]
+speaker_root_candidates = [
+    os.path.join(base_dir, 'normalised_loudspeaker'),
+    os.path.join(base_dir, 'loudspeaker_stimuli'),
+]
 
 _audio_exts = ('*.wav', '*.flac', '*.mp3', '*.aiff', '*.ogg')
 
@@ -427,20 +420,25 @@ def _list_audio(folder):
 # Load stimuli by type (environment, ISTS, noise) for both headphone and speaker
 stimulus_types = ['environment', 'ISTS', 'noise']
 
-headphone_stimuli = {}
-speaker_stimuli = {}
 
-for stim_type in stimulus_types:
-    headphone_stimuli[stim_type] = _list_audio(os.path.join(headphone_dir, stim_type))
-    speaker_stimuli[stim_type] = _list_audio(os.path.join(speaker_dir, stim_type))
-    print(f"Loaded {len(headphone_stimuli[stim_type])} headphone {stim_type} stimuli")
-    print(f"Loaded {len(speaker_stimuli[stim_type])} speaker {stim_type} stimuli")
-    
-    # Check for empty stimulus lists
-    if len(headphone_stimuli[stim_type]) == 0:
-        print(f"  WARNING: No headphone {stim_type} files found in {os.path.join(headphone_dir, stim_type)}")
-    if len(speaker_stimuli[stim_type]) == 0:
-        print(f"  WARNING: No speaker {stim_type} files found in {os.path.join(speaker_dir, stim_type)}")
+def load_stimulus_sets(root_candidates, label):
+    for root in root_candidates:
+        loaded = {}
+        for stim_type in stimulus_types:
+            loaded[stim_type] = _list_audio(os.path.join(root, stim_type))
+        if all(loaded[stim_type] for stim_type in stimulus_types):
+            print(f"Using {label} stimuli from {root}")
+            for stim_type in stimulus_types:
+                print(f"Loaded {len(loaded[stim_type])} {label} {stim_type} stimuli")
+            return root, loaded
+
+    raise FileNotFoundError(
+        f"No complete {label} stimulus set found in any of: {root_candidates}"
+    )
+
+
+headphone_dir, headphone_stimuli = load_stimulus_sets(headphone_root_candidates, 'headphone')
+speaker_dir, speaker_stimuli = load_stimulus_sets(speaker_root_candidates, 'speaker')
 
            
 #interstimulus interval
@@ -649,8 +647,8 @@ print("Demographics collection complete.\n")
 fixation = visual.TextStim(win, text='+', color='white', height=50)
 
 # Audio device indices (adjust these)
-headphones_device = 3  # Device index for headphones
-speakers_device = 4  # Device index for speakers
+headphones_device = 25  # Device index for headphones
+speakers_device = 5  # Device index for speakers
 
 
 #repeat for x trials. each new trial should be on a new row in the results table
@@ -661,19 +659,51 @@ practice_trials = 5
 number_of_trials = 24 #keep this at 96 for full experiment. multiple of 6
 number_of_blocks = 3
 trials_per_block_count = number_of_trials // number_of_blocks
-trial_list = []
 
-# Trial list format: [output, stim_type]
-# output: 0 = speakers, 1 = headphones
-# stim_type: 0 = noise, 1 = ISTS, 2 = environment
-for output in [0, 1]:  # 0 = speakers, 1 = headphones
-    for stim_type in [0, 1, 2]:  # 0 = noise, 1 = ISTS, 2 = environment
-        trials_per_combination = number_of_trials // 6  # 18 / 6 = 3
-        for _ in range(trials_per_combination):
-            trial_list.append([output, stim_type])
+if number_of_trials % 6 != 0:
+    raise ValueError("number_of_trials must be divisible by 6 (2 outputs x 3 stimulus types)")
+if number_of_trials % number_of_blocks != 0:
+    raise ValueError("number_of_trials must be divisible by number_of_blocks")
 
-# Shuffle the trial list
-random.shuffle(trial_list)
+
+def max_same_output_run(trials):
+    """Return longest consecutive run of same output code in a trial list."""
+    if not trials:
+        return 0
+    longest = 1
+    current = 1
+    previous_output = trials[0][0]
+    for output_code, _ in trials[1:]:
+        if output_code == previous_output:
+            current += 1
+            longest = max(longest, current)
+        else:
+            current = 1
+            previous_output = output_code
+    return longest
+
+
+def make_balanced_trial_list(n_trials, max_run=2):
+    """Create shuffled [output, stim_type] trials with exact 50/50 output balance."""
+    trials_per_combination = n_trials // 6
+    base_trials = []
+    for output in [0, 1]:
+        for stim_type in [0, 1, 2]:
+            base_trials.extend([[output, stim_type]] * trials_per_combination)
+
+    # Shuffle repeatedly until the output sequence is balanced and not overly clumped.
+    for _ in range(2000):
+        candidate = base_trials.copy()
+        random.shuffle(candidate)
+        if max_same_output_run(candidate) <= max_run:
+            return candidate
+
+    # Fallback: still balanced, just without the run-length constraint.
+    random.shuffle(base_trials)
+    return base_trials
+
+
+trial_list = make_balanced_trial_list(number_of_trials, max_run=2)
 
 # Map numeric codes to string labels
 output_map = {0: 'speaker', 1: 'headphone'}
@@ -687,6 +717,8 @@ print(f"  Headphone trials: {sum(1 for t in trial_list if t[0] == 1)}")
 print(f"  Speaker trials: {sum(1 for t in trial_list if t[0] == 0)}")
 for stim_code, stim_name in stim_type_map.items():
     print(f"  {stim_name.capitalize()} trials: {sum(1 for t in trial_list if t[1] == stim_code)}")
+output_preview = [output_map[t[0]] for t in trial_list[:12]]
+print(f"  First 12 trial outputs (shuffled): {output_preview}")
 print()
 
 # --- Practice trials ---
@@ -719,6 +751,12 @@ headphone_level_offset_db, speaker_level_offset_db = run_loudness_calibration(
     win,
     headphones_device=headphones_device,
     speakers_device=speakers_device
+)
+
+speaker_trial_stream, headphone_trial_stream = create_playback_streams(
+    headphones_device=headphones_device,
+    speakers_device=speakers_device,
+    sample_rate=48000,
 )
 
 # Display main task instructions after calibration
@@ -777,10 +815,6 @@ for p in range(practice_trials):
         gain_linear = 10 ** (gain_db / 20)
         audio_5s = audio_5s * gain_linear
 
-        if playback_type == 'headphone':
-            audio_5s = apply_personal_headphone_eq(audio_5s, fs)
-
-      #  audio_5s = apply_safety_limit(audio_5s)
         if audio_5s.ndim > 1 and playback_type == 'speaker':
             audio_5s = audio_5s.mean(axis=1)
         audio_5s = apply_device_specific_filter(audio_5s, fs, device_type='headphone' if playback_type == 'headphone' else 'speaker', order=4)
@@ -792,7 +826,6 @@ for p in range(practice_trials):
         audio_5s = apply_fade(audio_5s, fs, fade_ms=10)
         audio_5s = append_silence_tail(audio_5s, fs, tail_ms=20)
 
-        sd.default.device = (None, device)
         print(f"Practice {p+1}/{practice_trials}: {playback_type} via device {device} ({stim_category})")
 
         # Show only fixation cross initially
@@ -800,7 +833,13 @@ for p in range(practice_trials):
         win.flip()
 
         # START AUDIO PLAYBACK (non-blocking) and start timing immediately
-        sd.play(audio_5s, samplerate=fs, device=device)
+        playback_error = None
+        target_stream = headphone_trial_stream if playback_type == 'headphone' else speaker_trial_stream
+        playback_thread = threading.Thread(
+            target=lambda: play_audio_on_stream(audio_5s, target_stream),
+            daemon=True,
+        )
+        playback_thread.start()
         start_time = time.time()
         audio_duration = len(audio_5s) / fs
         
@@ -850,7 +889,7 @@ for p in range(practice_trials):
             
             core.wait(0.01)  # Small delay to prevent CPU overload
 
-        sd.wait()
+        playback_thread.join(timeout=2.0)
 
         # Require a response before advancing to next trial
         while response is None:
@@ -878,7 +917,7 @@ for p in range(practice_trials):
             core.wait(0.01)
 
     except Exception as e:
-        print(f"Error playing practice stimulus {stimulus}: {e}")
+        print(f"Error playing practice stimulus {stimulus} ({playback_type}, device {device}): {e}")
         sd.stop()  # Ensure audio is stopped on error
         continue
 
@@ -931,12 +970,6 @@ for block in range(number_of_blocks):
             gain_linear = 10 ** (gain_db / 20)
             audio_5s = audio_5s * gain_linear
 
-            if playback_type == 'headphone':
-                audio_5s = apply_personal_headphone_eq(audio_5s, fs)
-            
-            # Apply safety limiter to prevent dangerously loud playback
-           # audio_5s = apply_safety_limit(audio_5s)
-
             if audio_5s.ndim > 1 and playback_type == 'speaker':
                 audio_5s = audio_5s.mean(axis=1)
             audio_5s = apply_device_specific_filter(audio_5s, fs, device_type='headphone' if playback_type == 'headphone' else 'speaker', order=4)
@@ -948,8 +981,6 @@ for block in range(number_of_blocks):
             audio_5s = append_silence_tail(audio_5s, fs, tail_ms=20)
 
             # Explicitly set output device (leave input as default)
-            sd.default.device = (None, device)
-
             # Debug: log routing
             print(f"Trial {trial_index+1}/{number_of_trials}: {playback_type} via device {device} ({stim_category})")
             
@@ -958,7 +989,13 @@ for block in range(number_of_blocks):
             win.flip()
             
             # Start audio playback (non-blocking) and start timing immediately
-            sd.play(audio_5s, samplerate=fs, device=device)
+            playback_error = None
+            target_stream = headphone_trial_stream if playback_type == 'headphone' else speaker_trial_stream
+            playback_thread = threading.Thread(
+                target=lambda: play_audio_on_stream(audio_5s, target_stream),
+                daemon=True,
+            )
+            playback_thread.start()
             start_time = time.time()
             audio_duration = len(audio_5s) / fs
             
@@ -1008,7 +1045,7 @@ for block in range(number_of_blocks):
                 
                 core.wait(0.01)  # Small delay to prevent CPU overload
 
-            sd.wait()
+            playback_thread.join(timeout=2.0)
 
             # Require a response before advancing to next trial
             while response is None:
@@ -1036,7 +1073,7 @@ for block in range(number_of_blocks):
                 core.wait(0.01)
 
         except Exception as e:
-            print(f"Error playing stimulus {stimulus}: {e}")
+            print(f"Error playing stimulus {stimulus} ({playback_type}, device {device}): {e}")
             sd.stop()  # Ensure audio is stopped on error
             trial_index += 1  # Still increment to avoid getting stuck
             continue  # Skip this trial if error occurs
@@ -1079,6 +1116,19 @@ win.flip()
 
 # Wait for any key press before closing
 event.waitKeys()
+
+# Close playback streams
+try:
+    speaker_trial_stream.stop()
+    speaker_trial_stream.close()
+except Exception:
+    pass
+
+try:
+    headphone_trial_stream.stop()
+    headphone_trial_stream.close()
+except Exception:
+    pass
 
 # Close window and quit
 win.close()
