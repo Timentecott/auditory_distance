@@ -92,7 +92,7 @@ def apply_bandpass_filter(audio, sample_rate, hp_freq=80, lp_freq=10000, order=4
     return audio
 
 
-def apply_device_specific_filter(audio, sample_rate, device_type='headphone', order=4):
+def apply_device_specific_filter(audio, sample_rate, device_type='headphone', order=4, apply_hp=True, apply_lp=True):
     """
     Apply device-specific EQ to match frequency response between headphones and speakers.
     
@@ -101,6 +101,8 @@ def apply_device_specific_filter(audio, sample_rate, device_type='headphone', or
         sample_rate: Sample rate in Hz
         device_type: 'headphone' or 'speaker'
         order: Filter order
+        apply_hp: If True, apply high-pass filter (default True)
+        apply_lp: If True, apply low-pass filter (default True)
     
     Returns:
         Filtered audio array
@@ -115,17 +117,19 @@ def apply_device_specific_filter(audio, sample_rate, device_type='headphone', or
         hp_freq, lp_freq = 100, 7000
     else:
         # For speakers: gentler filtering, keep more bass and treble
-        # High-pass: 60 Hz (less aggressive)
-        # Low-pass: 11000 Hz (more treble)
-        hp_freq, lp_freq = 60, 11000
+        # High-pass: 100 Hz (less aggressive)
+        # Low-pass: 7000 Hz (more treble)
+        hp_freq, lp_freq = 100, 7000
     
-    # High-pass filter
-    sos_hp = signal.butter(order, hp_freq, btype='high', fs=sample_rate, output='sos')
-    audio = signal.sosfilt(sos_hp, audio, axis=0)
+    # High-pass filter (optional)
+    if apply_hp:
+        sos_hp = signal.butter(order, hp_freq, btype='high', fs=sample_rate, output='sos')
+        audio = signal.sosfilt(sos_hp, audio, axis=0)
     
-    # Low-pass filter
-    sos_lp = signal.butter(order, lp_freq, btype='low', fs=sample_rate, output='sos')
-    audio = signal.sosfilt(sos_lp, audio, axis=0)
+    # Low-pass filter (optional)
+    if apply_lp:
+        sos_lp = signal.butter(order, lp_freq, btype='low', fs=sample_rate, output='sos')
+        audio = signal.sosfilt(sos_lp, audio, axis=0)
     
     return audio
 
@@ -139,33 +143,60 @@ def ensure_stereo(audio):
     return audio[:, :2]
 
 
-def collapse_to_left_channel(audio):
+def collapse_to_left_channel(audio, preserve_total_rms=True):
     """
     Collapse audio to left channel only for loudspeaker playback.
-    
+
     Converts stereo/mono to stereo with left = audio, right = 0 (silence).
-    
+
     Args:
         audio: Audio array (mono or stereo)
-    
+        preserve_total_rms: If True, scale the resulting single-channel-left
+            stereo so the overall RMS (across channels) matches the input's
+            RMS. This preserves the total signal energy when collapsing.
+
     Returns:
-        Stereo audio array with right channel silenced
+        Stereo audio array with right channel silenced. dtype matches input.
     """
+    if audio is None:
+        return audio
+
+    # compute input RMS across all elements (samples x channels)
+    try:
+        audio_f = audio.astype(np.float64)
+    except Exception:
+        audio_f = np.array(audio, dtype=np.float64)
+
+    if audio_f.size == 0:
+        # empty input
+        if audio.ndim == 1:
+            return np.zeros((0, 2), dtype=audio.dtype)
+        return np.zeros((0, 2), dtype=audio.dtype)
+
+    orig_rms = np.sqrt(np.mean(np.square(audio_f)))
+
     if audio.ndim == 1:
         # Mono: convert to stereo with left = audio, right = silence
         stereo = np.zeros((len(audio), 2), dtype=audio.dtype)
         stereo[:, 0] = audio
-        return stereo
     elif audio.shape[1] >= 2:
         # Stereo or multi-channel: keep left (channel 0), silence right
         stereo = np.zeros_like(audio[:, :2])
         stereo[:, 0] = audio[:, 0]
-        return stereo
     else:
         # Single channel stereo-like array: convert to stereo
         stereo = np.zeros((audio.shape[0], 2), dtype=audio.dtype)
         stereo[:, 0] = audio[:, 0]
-        return stereo
+
+    if preserve_total_rms:
+        # compute new RMS and scale to match original RMS
+        stereo_f = stereo.astype(np.float64)
+        new_rms = np.sqrt(np.mean(np.square(stereo_f)))
+        if new_rms > 0 and orig_rms > 0:
+            scale = float(orig_rms / new_rms)
+            stereo = (stereo_f * scale).astype(audio.dtype)
+
+    return stereo
 
 def run_loudness_calibration(win, headphones_device, speakers_device, sample_rate=48000):
     """Calibrate headphone level against a fixed speaker reference using on-screen buttons."""
@@ -175,7 +206,11 @@ def run_loudness_calibration(win, headphones_device, speakers_device, sample_rat
     rng = np.random.default_rng(42)
     duration_s = 1.0
     reference_audio = rng.standard_normal(int(sample_rate * duration_s)).astype(np.float32)
-    reference_audio = reference_audio / np.max(np.abs(reference_audio)) * 0.5
+    # scale reference to target RMS for calibration
+    target_rms = 0.01
+    cur_rms = np.sqrt(np.mean(np.square(reference_audio.astype(np.float64))))
+    if cur_rms > 0:
+        reference_audio = (reference_audio.astype(np.float64) * (target_rms / cur_rms)).astype(np.float32)
 
     # Personal EQ is disabled, so use the raw reference audio.
     reference_headphone_eq = ensure_stereo(reference_audio).astype(np.float32)
@@ -250,7 +285,7 @@ def run_loudness_calibration(win, headphones_device, speakers_device, sample_rat
 
     def make_speaker_audio():
         audio = apply_gain_db(reference_audio, 0.0)
-        audio = collapse_to_left_channel(audio)
+        audio = collapse_to_left_channel(audio, preserve_total_rms=True)
         audio = apply_fade(audio, sample_rate, fade_ms=20)
         return audio
 
@@ -395,17 +430,10 @@ def create_playback_streams(headphones_device, speakers_device, sample_rate):
     headphone_stream.start()
     return speaker_stream, headphone_stream
 
+#load headphone stimuli from /localised_stimuli
 base_dir = os.path.dirname(__file__) if '__file__' in globals() else os.getcwd()
-headphone_root_candidates = [
-    os.path.join(base_dir, 'normalised_localised'),
-    os.path.join(base_dir, 'localised_stimuli_B20'),
-    os.path.join(base_dir, 'localised_stimuli_b20'),
-    os.path.join(base_dir, 'localised_stimuli'),
-]
-speaker_root_candidates = [
-    os.path.join(base_dir, 'normalised_loudspeaker'),
-    os.path.join(base_dir, 'loudspeaker_stimuli'),
-]
+headphone_dir = os.path.join(base_dir, 'normalised_localised')
+speaker_dir = os.path.join(base_dir, 'normalised_loudspeaker')
 
 _audio_exts = ('*.wav', '*.flac', '*.mp3', '*.aiff', '*.ogg')
 
@@ -420,25 +448,20 @@ def _list_audio(folder):
 # Load stimuli by type (environment, ISTS, noise) for both headphone and speaker
 stimulus_types = ['environment', 'ISTS', 'noise']
 
+headphone_stimuli = {}
+speaker_stimuli = {}
 
-def load_stimulus_sets(root_candidates, label):
-    for root in root_candidates:
-        loaded = {}
-        for stim_type in stimulus_types:
-            loaded[stim_type] = _list_audio(os.path.join(root, stim_type))
-        if all(loaded[stim_type] for stim_type in stimulus_types):
-            print(f"Using {label} stimuli from {root}")
-            for stim_type in stimulus_types:
-                print(f"Loaded {len(loaded[stim_type])} {label} {stim_type} stimuli")
-            return root, loaded
-
-    raise FileNotFoundError(
-        f"No complete {label} stimulus set found in any of: {root_candidates}"
-    )
-
-
-headphone_dir, headphone_stimuli = load_stimulus_sets(headphone_root_candidates, 'headphone')
-speaker_dir, speaker_stimuli = load_stimulus_sets(speaker_root_candidates, 'speaker')
+for stim_type in stimulus_types:
+    headphone_stimuli[stim_type] = _list_audio(os.path.join(headphone_dir, stim_type))
+    speaker_stimuli[stim_type] = _list_audio(os.path.join(speaker_dir, stim_type))
+    print(f"Loaded {len(headphone_stimuli[stim_type])} headphone {stim_type} stimuli")
+    print(f"Loaded {len(speaker_stimuli[stim_type])} speaker {stim_type} stimuli")
+    
+    # Check for empty stimulus lists
+    if len(headphone_stimuli[stim_type]) == 0:
+        print(f"  WARNING: No headphone {stim_type} files found in {os.path.join(headphone_dir, stim_type)}")
+    if len(speaker_stimuli[stim_type]) == 0:
+        print(f"  WARNING: No speaker {stim_type} files found in {os.path.join(speaker_dir, stim_type)}")
 
            
 #interstimulus interval
@@ -461,7 +484,7 @@ results = pd.DataFrame(columns=[
     'trial_number',         # trial number (includes practice)
     'trial_type',           # 'practice' or 'experimental'
     'block',                # block number (None for practice)
-    'presentation_type',    # 'headphone' or 'speaker'
+    'presentation_type',    # 'speaker', 'headphone', or 'eq_headphone'
     'stimulus',             # stimulus filename or ID
     'stimulus_category',    # environment, ISTS, or noise
     'gain_db',              # gain applied to stimulus in dB
@@ -499,6 +522,116 @@ def save_demographics():
         print(f"Demographics saved to {fname}")
     except Exception as e:
         print(f"Warning: failed to save demographics: {e}")
+
+
+def fetch_individual_eq(participant_id):
+    """Find the participant-specific headphone response file exported by DgSonicFocus."""
+    eq_file = Path(r"C:\Users\Tim\Documents\DgSonicFocus") / str(participant_id) / 'headphone1_response.txt'
+    if eq_file.exists():
+        return eq_file
+
+    print(f"Warning: Individual EQ file not found for participant {participant_id}: {eq_file}")
+    return None
+
+
+def _design_peaking_sos(f0_hz, gain_db, q, sample_rate):
+    nyquist = sample_rate / 2.0
+    if f0_hz <= 0 or f0_hz >= nyquist:
+        return None
+
+    amplitude = 10.0 ** (gain_db / 40.0)
+    w0 = 2.0 * np.pi * (f0_hz / sample_rate)
+    cos_w0 = np.cos(w0)
+    sin_w0 = np.sin(w0)
+    alpha = sin_w0 / (2.0 * q)
+
+    b0 = 1.0 + alpha * amplitude
+    b1 = -2.0 * cos_w0
+    b2 = 1.0 - alpha * amplitude
+    a0 = 1.0 + alpha / amplitude
+    a1 = -2.0 * cos_w0
+    a2 = 1.0 - alpha / amplitude
+
+    if a0 == 0:
+        return None
+
+    return np.array([
+        b0 / a0,
+        b1 / a0,
+        b2 / a0,
+        1.0,
+        a1 / a0,
+        a2 / a0,
+    ], dtype=np.float64)
+
+
+def _load_individual_eq(eq_file):
+    freqs = []
+    gains_db = []
+
+    with Path(eq_file).open('r', encoding='utf-8') as handle:
+        for raw_line in handle:
+            line = raw_line.strip()
+            if not line or line.startswith('#'):
+                continue
+
+            parts = line.replace(',', ' ').split()
+            try:
+                values = [float(value) for value in parts]
+            except ValueError:
+                continue
+
+            if len(values) < 2:
+                continue
+
+            freqs.append(values[0])
+            gains_db.append(values[1])
+
+    if not freqs:
+        raise ValueError(f"No valid EQ rows found in: {eq_file}")
+
+    freqs = np.asarray(freqs, dtype=np.float64)
+    gains_db = np.asarray(gains_db, dtype=np.float64)
+    order = np.argsort(freqs)
+    return freqs[order], gains_db[order]
+
+
+def apply_individual_eq(audio, eq_file, sample_rate):
+    """Apply participant-specific headphone EQ to audio using a Q=5 peaking filter bank."""
+    if eq_file is None:
+        return audio
+
+    audio = np.asarray(audio, dtype=np.float32)
+    freqs_hz, gains_db = _load_individual_eq(eq_file)
+
+    sos_rows = []
+    for f0_hz, gain_db in zip(freqs_hz, gains_db):
+        if abs(float(gain_db)) < 1e-9:
+            continue
+        row = _design_peaking_sos(float(f0_hz), float(gain_db), q=5.0, sample_rate=sample_rate)
+        if row is not None:
+            sos_rows.append(row)
+
+    if not sos_rows:
+        return audio
+
+    sos = np.vstack(sos_rows)
+    if audio.ndim == 1:
+        processed = signal.sosfilt(sos, audio.astype(np.float64))
+        processed = processed.astype(np.float32)
+    else:
+        channels = []
+        for channel_index in range(audio.shape[1]):
+            channel_audio = signal.sosfilt(sos, audio[:, channel_index].astype(np.float64))
+            channels.append(channel_audio.astype(np.float32))
+        processed = np.column_stack(channels)
+
+    peak = float(np.max(np.abs(processed))) if processed.size else 0.0
+    if peak > 1.0:
+        processed = processed / peak
+
+    return processed
+
 
 def append_result(presentation_type, stimulus, response, rt, accuracy, stimulus_category=None, gain_db=None, trial_type='experimental', block=None):
     """Append one trial's data to the results table and persist to CSV immediately."""
@@ -641,6 +774,8 @@ print(f"Musical experience: {participant_musical_experience}")
 save_demographics()
 print("Demographics collection complete.\n")
 
+individual_eq_file = fetch_individual_eq(participant_id)
+
 
 ##trial structure:
 # Show fixation cross and wait for ISI
@@ -656,12 +791,12 @@ speakers_device = 5  # Device index for speakers
 practice_trials = 5
 
 # Generate balanced trial list
-number_of_trials = 24 #keep this at 96 for full experiment. multiple of 6
+number_of_trials = 27 # keep this at 99 for full experiment. multiple of 9
 number_of_blocks = 3
 trials_per_block_count = number_of_trials // number_of_blocks
 
-if number_of_trials % 6 != 0:
-    raise ValueError("number_of_trials must be divisible by 6 (2 outputs x 3 stimulus types)")
+if number_of_trials % 9 != 0:
+    raise ValueError("number_of_trials must be divisible by 9 (3 outputs x 3 stimulus types)")
 if number_of_trials % number_of_blocks != 0:
     raise ValueError("number_of_trials must be divisible by number_of_blocks")
 
@@ -684,10 +819,10 @@ def max_same_output_run(trials):
 
 
 def make_balanced_trial_list(n_trials, max_run=2):
-    """Create shuffled [output, stim_type] trials with exact 50/50 output balance."""
-    trials_per_combination = n_trials // 6
+    """Create shuffled [output, stim_type] trials with exact 1/3 output balance."""
+    trials_per_combination = n_trials // 9
     base_trials = []
-    for output in [0, 1]:
+    for output in [0, 1, 2]:
         for stim_type in [0, 1, 2]:
             base_trials.extend([[output, stim_type]] * trials_per_combination)
 
@@ -706,14 +841,20 @@ def make_balanced_trial_list(n_trials, max_run=2):
 trial_list = make_balanced_trial_list(number_of_trials, max_run=2)
 
 # Map numeric codes to string labels
-output_map = {0: 'speaker', 1: 'headphone'}
+output_map = {0: 'speaker', 1: 'headphone', 2: 'eq_headphone'}
 stim_type_map = {0: 'noise', 1: 'ISTS', 2: 'environment'}
+
+
+def is_headphone_like(playback_type):
+    """Return True for headphone-style presentation methods."""
+    return playback_type in ('headphone', 'eq_headphone')
 
 print(f"\nTrial configuration:")
 print(f"  Total trials: {number_of_trials}")
 print(f"  Blocks: {number_of_blocks}")
 print(f"  Trials per block: {trials_per_block_count}")
 print(f"  Headphone trials: {sum(1 for t in trial_list if t[0] == 1)}")
+print(f"  EQ-headphone trials: {sum(1 for t in trial_list if t[0] == 2)}")
 print(f"  Speaker trials: {sum(1 for t in trial_list if t[0] == 0)}")
 for stim_code, stim_name in stim_type_map.items():
     print(f"  {stim_name.capitalize()} trials: {sum(1 for t in trial_list if t[1] == stim_code)}")
@@ -791,10 +932,10 @@ for p in range(practice_trials):
     core.wait(ISI)
 
     # Randomly choose playback and stimulus category for practice
-    playback_type = random.choice(['headphone', 'speaker'])
+    playback_type = random.choice(['headphone', 'eq_headphone', 'speaker'])
     stim_category = random.choice(stimulus_types)
 
-    if playback_type == 'headphone':
+    if is_headphone_like(playback_type):
         stimulus = random.choice(headphone_stimuli[stim_category])
         device = headphones_device
     else:
@@ -807,8 +948,8 @@ for p in range(practice_trials):
         audio_data, fs = sf.read(stimulus)
         samples_5s = int(5 * fs)
         audio_5s = audio_data[:samples_5s]
-        gain_db = random.uniform(-2, 2)
-        if playback_type == 'headphone':
+        gain_db = random.uniform(0, 0) # random gain can be adjusted currently zero
+        if is_headphone_like(playback_type):
             gain_db += headphone_level_offset_db
         else:
             gain_db += speaker_level_offset_db
@@ -817,10 +958,13 @@ for p in range(practice_trials):
 
         if audio_5s.ndim > 1 and playback_type == 'speaker':
             audio_5s = audio_5s.mean(axis=1)
-        audio_5s = apply_device_specific_filter(audio_5s, fs, device_type='headphone' if playback_type == 'headphone' else 'speaker', order=4)
+        audio_5s = apply_device_specific_filter(audio_5s, fs, device_type='headphone' if is_headphone_like(playback_type) else 'speaker', order=4)
+
+        if playback_type == 'eq_headphone' and individual_eq_file is not None:
+            audio_5s = apply_individual_eq(audio_5s, individual_eq_file, fs)
 
         if playback_type == 'speaker':
-            audio_5s = collapse_to_left_channel(audio_5s)
+            audio_5s = collapse_to_left_channel(audio_5s, preserve_total_rms=True)
         else:
             audio_5s = ensure_stereo(audio_5s)
         audio_5s = apply_fade(audio_5s, fs, fade_ms=10)
@@ -834,7 +978,7 @@ for p in range(practice_trials):
 
         # START AUDIO PLAYBACK (non-blocking) and start timing immediately
         playback_error = None
-        target_stream = headphone_trial_stream if playback_type == 'headphone' else speaker_trial_stream
+        target_stream = headphone_trial_stream if is_headphone_like(playback_type) else speaker_trial_stream
         playback_thread = threading.Thread(
             target=lambda: play_audio_on_stream(audio_5s, target_stream),
             daemon=True,
@@ -921,7 +1065,7 @@ for p in range(practice_trials):
         sd.stop()  # Ensure audio is stopped on error
         continue
 
-    if (response == 'up' and playback_type == 'speaker') or (response == 'down' and playback_type == 'headphone'):
+    if (response == 'up' and playback_type == 'speaker') or (response == 'down' and is_headphone_like(playback_type)):
         accuracy = 1
     else:
         accuracy = 0
@@ -947,7 +1091,7 @@ for block in range(number_of_blocks):
         playback_type = output_map[output_code]
         stim_category = stim_type_map[stim_type_code]
         
-        if playback_type == 'headphone':
+        if is_headphone_like(playback_type):
             stimulus = random.choice(headphone_stimuli[stim_category])
             device = headphones_device
         else:
@@ -963,7 +1107,7 @@ for block in range(number_of_blocks):
             audio_5s = audio_data[:samples_5s]
             # Apply random gain between -5 and +5 dB
             gain_db = random.uniform(-2 , 2)
-            if playback_type == 'headphone':
+            if is_headphone_like(playback_type):
                 gain_db += headphone_level_offset_db
             else:
                 gain_db += speaker_level_offset_db
@@ -972,9 +1116,13 @@ for block in range(number_of_blocks):
 
             if audio_5s.ndim > 1 and playback_type == 'speaker':
                 audio_5s = audio_5s.mean(axis=1)
-            audio_5s = apply_device_specific_filter(audio_5s, fs, device_type='headphone' if playback_type == 'headphone' else 'speaker', order=4)
+            audio_5s = apply_device_specific_filter(audio_5s, fs, device_type='headphone' if is_headphone_like(playback_type) else 'speaker', order=4)
+
+            if playback_type == 'eq_headphone': #and individual_eq_file is not None:
+                audio_5s = apply_individual_eq(audio_5s, individual_eq_file, fs)
+
             if playback_type == 'speaker':
-                audio_5s = collapse_to_left_channel(audio_5s)
+                audio_5s = collapse_to_left_channel(audio_5s, preserve_total_rms=True)
             else:
                 audio_5s = ensure_stereo(audio_5s)
             audio_5s = apply_fade(audio_5s, fs, fade_ms=10)
@@ -990,7 +1138,7 @@ for block in range(number_of_blocks):
             
             # Start audio playback (non-blocking) and start timing immediately
             playback_error = None
-            target_stream = headphone_trial_stream if playback_type == 'headphone' else speaker_trial_stream
+            target_stream = headphone_trial_stream if is_headphone_like(playback_type) else speaker_trial_stream
             playback_thread = threading.Thread(
                 target=lambda: play_audio_on_stream(audio_5s, target_stream),
                 daemon=True,
@@ -1078,7 +1226,7 @@ for block in range(number_of_blocks):
             trial_index += 1  # Still increment to avoid getting stuck
             continue  # Skip this trial if error occurs
 
-        if (response == 'up' and playback_type == 'speaker') or (response == 'down' and playback_type == 'headphone'):
+        if (response == 'up' and playback_type == 'speaker') or (response == 'down' and is_headphone_like(playback_type)):
             accuracy = 1
         else:
             accuracy = 0
