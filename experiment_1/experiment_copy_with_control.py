@@ -5,9 +5,12 @@ import pandas as pd
 import time
 import numpy as np
 import random
-import sounddevice as sd
-import soundfile as sf
 import os, glob
+os.environ["SD_ENABLE_ASIO"] = "1"
+import sounddevice as sd
+
+import soundfile as sf
+
 from pathlib import Path
 from scipy import signal
 import threading
@@ -57,6 +60,15 @@ def play_audio_on_stream(audio, stream):
     """Play a block of audio through an already-open output stream."""
     audio = np.asarray(audio, dtype=np.float32)
     stream.write(audio)
+
+
+def play_audio_on_device(audio, sample_rate, device_index, mapping=None):
+    """Play a block of audio through a device using the same ASIO path as the device test script."""
+    audio = np.asarray(audio, dtype=np.float32)
+    print(f"  [play_audio_on_device] device={device_index}, mapping={mapping}, shape={audio.shape}, dtype={audio.dtype}")
+    sd.play(audio, samplerate=sample_rate, device=device_index, mapping=mapping)
+    sd.wait()
+    print(f"  [play_audio_on_device] playback complete")
 
 
 def apply_gain_db(audio, gain_db):
@@ -143,6 +155,19 @@ def ensure_stereo(audio):
     return audio[:, :2]
 
 
+def route_to_asio_channels(audio, device_role):
+    """Route stereo audio to ASIO channels 1-2 for loudspeaker or 3-4 for headphone."""
+    audio = ensure_stereo(np.asarray(audio))
+    routed = np.zeros((audio.shape[0], 4), dtype=np.float32)
+    if device_role == 'speaker':
+        routed[:, 0:2] = audio[:, :2]
+    elif device_role == 'headphone':
+        routed[:, 2:4] = audio[:, :2]
+    else:
+        raise ValueError(f"Unknown device_role: {device_role}")
+    return routed
+
+
 def collapse_to_left_channel(audio, preserve_total_rms=True):
     """
     Collapse audio to left channel only for loudspeaker playback.
@@ -200,8 +225,11 @@ def collapse_to_left_channel(audio, preserve_total_rms=True):
 
 def run_loudness_calibration(win, headphones_device, speakers_device, sample_rate=48000):
     """Calibrate headphone level against a fixed speaker reference using on-screen buttons."""
-    if headphones_device == speakers_device:
-        raise ValueError("Headphone and speaker device indices are the same. Set different device indices before calibration.")
+    if headphones_device != speakers_device:
+        print(f"Warning: calibration will use device {speakers_device} for both speaker and headphone routing.")
+
+    if headphones_device != 16 or speakers_device != 16:
+        print("Warning: ASIO channel routing is configured for device index 16.")
 
     rng = np.random.default_rng(42)
     duration_s = 1.0
@@ -287,12 +315,12 @@ def run_loudness_calibration(win, headphones_device, speakers_device, sample_rat
         audio = apply_gain_db(reference_audio, 0.0)
         audio = collapse_to_left_channel(audio, preserve_total_rms=True)
         audio = apply_fade(audio, sample_rate, fade_ms=20)
-        return audio
-
+        return ensure_stereo(audio)
+ 
     def make_headphone_audio(current_hp_offset_db):
         audio = apply_gain_db(reference_headphone_eq, current_hp_offset_db)
         audio = apply_fade(audio, sample_rate, fade_ms=20)
-        return audio
+        return ensure_stereo(audio)
 
     mouse.clickReset()
     prev_mouse_down = False
@@ -316,80 +344,47 @@ def run_loudness_calibration(win, headphones_device, speakers_device, sample_rat
 
     sd.default.latency = 'low'
 
-    phase_lock = threading.Lock()
-    current_phase = "LOUDSPEAKER"
-    stop_event = threading.Event()
-    playback_error = None
-
     speaker_audio = make_speaker_audio().astype(np.float32)
 
-    speaker_stream = sd.OutputStream(
-        samplerate=sample_rate,
-        channels=2,
-        dtype='float32',
-        latency='low',
-        device=speakers_device,
-    )
-    headphone_stream = sd.OutputStream(
-        samplerate=sample_rate,
-        channels=2,
-        dtype='float32',
-        latency='low',
-        device=headphones_device,
-    )
-
-    def playback_loop():
-        nonlocal current_phase, headphone_offset_db, playback_error
-        try:
-            while not stop_event.is_set():
-                with phase_lock:
-                    current_phase = "LOUDSPEAKER"
-                speaker_stream.write(speaker_audio)
-                if stop_event.is_set():
-                    break
-
-                with phase_lock:
-                    current_phase = "HEADPHONE"
-                    hp_offset = headphone_offset_db
-                headphone_audio = make_headphone_audio(hp_offset).astype(np.float32)
-                headphone_stream.write(headphone_audio)
-        except Exception as e:
-            playback_error = e
-            stop_event.set()
-
+    # Main calibration loop - play alternating audio while allowing button adjustments
     try:
-        speaker_stream.start()
-        headphone_stream.start()
-
-        playback_thread = threading.Thread(target=playback_loop, daemon=True)
-        playback_thread.start()
-
         while not store_selected:
-            if playback_error is not None:
-                raise RuntimeError(f"Calibration playback failed: {playback_error}")
+            # Play speaker audio
+            print("Playing speaker (channels 1-2)...")
+            draw_calibration_screen("Playing loudspeaker...", "Playing: LOUDSPEAKER")
+            try:
+                play_audio_on_device(speaker_audio, sample_rate, speakers_device, mapping=[1, 2])
+            except Exception as e:
+                print(f"Error playing speaker: {e}")
+                raise
 
-            with phase_lock:
-                phase_label = f"Playing: {current_phase}"
-            draw_calibration_screen(
-                "Click + or - while alternating playback runs, or Store to finish.",
-                phase_label,
-            )
-            maybe_handle_click()
-            core.wait(0.01)
+            # Check for button press during inter-stimulus interval
+            for _ in range(5):
+                draw_calibration_screen("Adjusting...", "")
+                maybe_handle_click()
+                core.wait(0.2)
+            
+            if store_selected:
+                break
 
-        stop_event.set()
-        playback_thread.join(timeout=2.5)
+            # Play headphone audio
+            print("Playing headphone (channels 3-4)...")
+            hp_offset = headphone_offset_db
+            headphone_audio = make_headphone_audio(hp_offset).astype(np.float32)
+            draw_calibration_screen("Playing headphone...", "Playing: HEADPHONE")
+            try:
+                play_audio_on_device(headphone_audio, sample_rate, headphones_device, mapping=[3, 4])
+            except Exception as e:
+                print(f"Error playing headphone: {e}")
+                raise
+
+            # Check for button press during inter-stimulus interval
+            for _ in range(5):
+                draw_calibration_screen("Adjusting...", "")
+                maybe_handle_click()
+                core.wait(0.2)
     finally:
-        try:
-            speaker_stream.stop()
-            speaker_stream.close()
-        except Exception:
-            pass
-        try:
-            headphone_stream.stop()
-            headphone_stream.close()
-        except Exception:
-            pass
+        sd.stop()
 
     done = visual.TextStim(
         win,
@@ -412,23 +407,7 @@ def run_loudness_calibration(win, headphones_device, speakers_device, sample_rat
 
 def create_playback_streams(headphones_device, speakers_device, sample_rate):
     """Open persistent playback streams for headphone and speaker output."""
-    speaker_stream = sd.OutputStream(
-        samplerate=sample_rate,
-        channels=2,
-        dtype='float32',
-        latency='low',
-        device=speakers_device,
-    )
-    headphone_stream = sd.OutputStream(
-        samplerate=sample_rate,
-        channels=2,
-        dtype='float32',
-        latency='low',
-        device=headphones_device,
-    )
-    speaker_stream.start()
-    headphone_stream.start()
-    return speaker_stream, headphone_stream
+    return None, None
 
 #load headphone stimuli from /localised_stimuli
 base_dir = os.path.dirname(__file__) if '__file__' in globals() else os.getcwd()
@@ -664,7 +643,7 @@ def append_result(presentation_type, stimulus, response, rt, accuracy, stimulus_
 win = visual.Window(
     size=(1024, 768),
     units='pix',
-    fullscr=True,
+    fullscr=False,
     color=(0, 0, 0),
     allowStencil=False
 )
@@ -782,9 +761,11 @@ individual_eq_file = fetch_individual_eq(participant_id)
 fixation = visual.TextStim(win, text='+', color='white', height=50)
 
 # Audio device indices (adjust these)
-headphones_device = 25  # Device index for headphones
-speakers_device = 5  # Device index for speakers
-
+ASIO_AGGREGATE_DEVICE = 16  # ASIO4ALL v2 aggregate: 4 output channels
+ASIO_SPEAKER_MAPPING = [1, 2]
+ASIO_HEADPHONE_MAPPING = [3, 4]
+headphones_device = ASIO_AGGREGATE_DEVICE
+speakers_device = ASIO_AGGREGATE_DEVICE
 
 #repeat for x trials. each new trial should be on a new row in the results table
 # Run trials in 3 blocks with breaks
@@ -894,12 +875,6 @@ headphone_level_offset_db, speaker_level_offset_db = run_loudness_calibration(
     speakers_device=speakers_device
 )
 
-speaker_trial_stream, headphone_trial_stream = create_playback_streams(
-    headphones_device=headphones_device,
-    speakers_device=speakers_device,
-    sample_rate=48000,
-)
-
 # Display main task instructions after calibration
 instructions_text = """You will hear sounds either through headphones or loudspeakers.
 
@@ -962,11 +937,8 @@ for p in range(practice_trials):
 
         if playback_type == 'eq_headphone' and individual_eq_file is not None:
             audio_5s = apply_individual_eq(audio_5s, individual_eq_file, fs)
-
-        if playback_type == 'speaker':
-            audio_5s = collapse_to_left_channel(audio_5s, preserve_total_rms=True)
-        else:
-            audio_5s = ensure_stereo(audio_5s)
+ 
+        audio_5s = ensure_stereo(audio_5s)
         audio_5s = apply_fade(audio_5s, fs, fade_ms=10)
         audio_5s = append_silence_tail(audio_5s, fs, tail_ms=20)
 
@@ -978,9 +950,13 @@ for p in range(practice_trials):
 
         # START AUDIO PLAYBACK (non-blocking) and start timing immediately
         playback_error = None
-        target_stream = headphone_trial_stream if is_headphone_like(playback_type) else speaker_trial_stream
         playback_thread = threading.Thread(
-            target=lambda: play_audio_on_stream(audio_5s, target_stream),
+            target=lambda: play_audio_on_device(
+                audio_5s,
+                fs,
+                device,
+                mapping=[3, 4] if is_headphone_like(playback_type) else [1, 2],
+            ),
             daemon=True,
         )
         playback_thread.start()
@@ -1096,7 +1072,7 @@ for block in range(number_of_blocks):
             device = headphones_device
         else:
             stimulus = random.choice(speaker_stimuli[stim_category])
-            device = speakers_device
+            device = speakers_device 
         
         response = None  # Initialize response variable
         rt = 0
@@ -1120,11 +1096,8 @@ for block in range(number_of_blocks):
 
             if playback_type == 'eq_headphone': #and individual_eq_file is not None:
                 audio_5s = apply_individual_eq(audio_5s, individual_eq_file, fs)
-
-            if playback_type == 'speaker':
-                audio_5s = collapse_to_left_channel(audio_5s, preserve_total_rms=True)
-            else:
-                audio_5s = ensure_stereo(audio_5s)
+  
+            audio_5s = ensure_stereo(audio_5s)
             audio_5s = apply_fade(audio_5s, fs, fade_ms=10)
             audio_5s = append_silence_tail(audio_5s, fs, tail_ms=20)
 
@@ -1138,9 +1111,13 @@ for block in range(number_of_blocks):
             
             # Start audio playback (non-blocking) and start timing immediately
             playback_error = None
-            target_stream = headphone_trial_stream if is_headphone_like(playback_type) else speaker_trial_stream
             playback_thread = threading.Thread(
-                target=lambda: play_audio_on_stream(audio_5s, target_stream),
+                target=lambda: play_audio_on_device(
+                    audio_5s,
+                    fs,
+                    device,
+                    mapping=[3, 4] if is_headphone_like(playback_type) else [1, 2],
+                ),
                 daemon=True,
             )
             playback_thread.start()
@@ -1212,13 +1189,13 @@ for block in range(number_of_blocks):
                         rt = time.time() - start_time
                         response_message = "response recorded - headphone"
 
-                fixation.draw()
-                if info_image:
-                    info_image.draw()
-                response_feedback.setText(response_message if response_message else "please respond: up=loudspeaker, down=headphone")
-                response_feedback.draw()
-                win.flip()
-                core.wait(0.01)
+            fixation.draw()
+            if info_image:
+                info_image.draw()
+            response_feedback.setText(response_message if response_message else "please respond: up=loudspeaker, down=headphone")
+            response_feedback.draw()
+            win.flip()
+            core.wait(0.01)
 
         except Exception as e:
             print(f"Error playing stimulus {stimulus} ({playback_type}, device {device}): {e}")
@@ -1265,19 +1242,9 @@ win.flip()
 # Wait for any key press before closing
 event.waitKeys()
 
-# Close playback streams
-try:
-    speaker_trial_stream.stop()
-    speaker_trial_stream.close()
-except Exception:
-    pass
-
-try:
-    headphone_trial_stream.stop()
-    headphone_trial_stream.close()
-except Exception:
-    pass
-
+# Stop any active playback before exit.
+sd.stop()
+ 
 # Close window and quit
 win.close()
 core.quit()

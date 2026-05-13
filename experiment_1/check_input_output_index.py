@@ -1,6 +1,9 @@
 # Check Input/Output Device Index
 # Displays available audio input/output devices, allows selection, and tests recording/playback
 
+# Set environment variable before importing sounddevice. Value is not important.
+import os
+os.environ["SD_ENABLE_ASIO"] = "1"
 import sounddevice as sd
 import soundfile as sf
 import numpy as np
@@ -10,6 +13,40 @@ import time
 SAMPLE_RATE = 48000
 INPUT_DURATION = 10  # seconds
 OUTPUT_DURATION = 1.0  # seconds
+
+
+def get_hostapi_name(hostapi_index):
+    """Return the name of a host API by index."""
+    try:
+        return sd.query_hostapis(hostapi_index)['name']
+    except Exception:
+        return f"Host API {hostapi_index}"
+
+
+def list_host_apis():
+    """Display all available host APIs, including ASIO if present."""
+    print("\n" + "=" * 70)
+    print("AVAILABLE AUDIO HOST APIS")
+    print("=" * 70)
+
+    hostapis = sd.query_hostapis()
+    asio_found = False
+
+    for idx, hostapi in enumerate(hostapis):
+        name = hostapi['name']
+        default_device = hostapi.get('default_device', None)
+        print(f"\nIndex: {idx}")
+        print(f"  Name: {name}")
+        print(f"  Default device: {default_device}")
+        if 'asio' in name.lower():
+            asio_found = True
+
+    if asio_found:
+        print("\nASIO host API detected.")
+    else:
+        print("\nASIO host API not detected in this PortAudio/sounddevice build.")
+
+    print("=" * 70)
 
 
 def list_input_devices():
@@ -24,8 +61,10 @@ def list_input_devices():
     for idx, device in enumerate(devices):
         if device['max_input_channels'] > 0:
             input_devices.append(idx)
+            hostapi_name = get_hostapi_name(device['hostapi'])
             print(f"\nIndex: {idx}")
             print(f"  Name: {device['name']}")
+            print(f"  Host API: {hostapi_name}")
             print(f"  Input channels: {device['max_input_channels']}")
             print(f"  Sample rate: {device['default_samplerate']} Hz")
 
@@ -45,8 +84,10 @@ def list_output_devices():
     for idx, device in enumerate(devices):
         if device['max_output_channels'] > 0:
             output_devices.append(idx)
+            hostapi_name = get_hostapi_name(device['hostapi'])
             print(f"\nIndex: {idx}")
             print(f"  Name: {device['name']}")
+            print(f"  Host API: {hostapi_name}")
             print(f"  Output channels: {device['max_output_channels']}")
             print(f"  Sample rate: {device['default_samplerate']} Hz")
 
@@ -80,12 +121,14 @@ def record_audio(device_index, duration=INPUT_DURATION, sample_rate=SAMPLE_RATE)
     return recording
 
 
-def play_audio(audio, sample_rate=SAMPLE_RATE, device_index=None):
+def play_audio(audio, sample_rate=SAMPLE_RATE, device_index=None, mapping=None):
     """Play audio through a specified output device or the default output device."""
     target = f"device {device_index}" if device_index is not None else "the default output device"
+    if mapping is not None:
+        target += f" on channels {mapping}"
     print(f"\nPlaying audio through {target}...")
     print("Playback starting...")
-    sd.play(audio, samplerate=sample_rate, device=device_index)
+    sd.play(audio, samplerate=sample_rate, device=device_index, mapping=mapping)
     sd.wait()
     print("Playback complete!")
 
@@ -94,6 +137,13 @@ def make_test_tone(duration=OUTPUT_DURATION, sample_rate=SAMPLE_RATE, frequency=
     """Generate a simple sine wave test tone."""
     t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
     return amplitude * np.sin(2 * np.pi * frequency * t)
+
+
+def make_stereo_test_tone(duration=OUTPUT_DURATION, sample_rate=SAMPLE_RATE):
+    """Generate a simple stereo test tone."""
+    left = make_test_tone(duration=duration, sample_rate=sample_rate, frequency=440)
+    right = make_test_tone(duration=duration, sample_rate=sample_rate, frequency=660)
+    return np.column_stack([left, right])
 
 
 def analyze_recording(audio):
@@ -151,6 +201,7 @@ def test_input_device():
 
             device_info = sd.query_devices(device_index)
             print(f"\nSelected input device: {device_info['name']}")
+            print(f"Selected host API: {get_hostapi_name(device_info['hostapi'])}")
 
             recording = record_audio(device_index, duration=INPUT_DURATION, sample_rate=SAMPLE_RATE)
             analyze_recording(recording)
@@ -159,8 +210,9 @@ def test_input_device():
             if playback == 'y':
                 play_audio(recording, sample_rate=SAMPLE_RATE)
 
-            save = input("\nSave recording to file? (y/n): ").strip().lower()
-            if save == 'y':
+            save = input("\nSave recording to file? (y/n): ")
+
+            if save := input("\nSave recording to file? (y/n): ").strip().lower() == 'y':
                 filename = f"test_recording_device_{device_index}.wav"
                 sf.write(filename, recording, SAMPLE_RATE)
                 print(f"Saved to: {filename}")
@@ -176,6 +228,61 @@ def test_input_device():
             print(f"\nError: {e}")
             import traceback
             traceback.print_exc()
+
+
+def test_output_channels(device_index):
+    """Test channel pairs on an ASIO output device with at least 4 channels."""
+    device_info = sd.query_devices(device_index)
+    max_channels = int(device_info['max_output_channels'])
+    hostapi_name = get_hostapi_name(device_info['hostapi'])
+
+    print(f"\nSelected output device: {device_info['name']}")
+    print(f"Selected host API: {hostapi_name}")
+    print(f"Maximum output channels: {max_channels}")
+
+    if max_channels < 4:
+        print("\nThis device has fewer than 4 output channels, so channel-pair testing is not available.")
+        return
+
+    if 'asio' not in hostapi_name.lower():
+        print("\nChannel-pair testing is intended for ASIO devices.")
+        print("Your selected device is not using ASIO, so channel mapping may not behave as expected.")
+
+    while True:
+        print("\nChoose a channel pair to test:")
+        if device_index == 16:
+            print("  1 - Loudspeaker on channels 1 and 2")
+            print("  2 - Headphone on channels 3 and 4")
+        else:
+            print("  1 - Test channels 1 and 2")
+            print("  2 - Test channels 3 and 4")
+        print("  b - Go back")
+        print("  q - Quit")
+        choice = input("Selection: ").strip().lower()
+
+        if choice == 'q':
+            raise KeyboardInterrupt
+        if choice == 'b':
+            return
+
+        if choice == '1':
+            mapping = [1, 2]
+            label = "loudspeaker" if device_index == 16 else "channels 1 and 2"
+        elif choice == '2':
+            mapping = [3, 4]
+            label = "headphone" if device_index == 16 else "channels 3 and 4"
+        else:
+            print("Invalid selection. Please choose 1, 2, b, or q.")
+            continue
+
+        print(f"\nTesting {label} on device index {device_index}")
+        print("Left tone: 440 Hz, Right tone: 660 Hz")
+        stereo_tone = make_stereo_test_tone()
+        play_audio(stereo_tone, sample_rate=SAMPLE_RATE, device_index=device_index, mapping=mapping)
+
+        again = input("\nTest another channel pair on this device? (y/n): ").strip().lower()
+        if again != 'y':
+            return
 
 
 def test_output_device():
@@ -206,6 +313,14 @@ def test_output_device():
 
             device_info = sd.query_devices(device_index)
             print(f"\nSelected output device: {device_info['name']}")
+            print(f"Selected host API: {get_hostapi_name(device_info['hostapi'])}")
+
+            if device_info['max_output_channels'] >= 4:
+                channel_test = input("\nTest loudspeaker/headphone channel pairs? (y/n): ").strip().lower()
+                if channel_test == 'y':
+                    test_output_channels(device_index)
+                    continue
+
             play_audio(test_tone, sample_rate=SAMPLE_RATE, device_index=device_index)
 
             again = input("\nTest another output device? (y/n): ").strip().lower()
@@ -225,6 +340,7 @@ def main():
     """Main function."""
     print("\nAudio Device Checker")
     print("This tool helps you find and test microphone inputs and speaker outputs")
+    list_host_apis()
 
     while True:
         print("\nChoose an option:")
