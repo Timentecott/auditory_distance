@@ -418,6 +418,52 @@ def create_playback_streams(headphones_device, speakers_device, sample_rate):
     """Open persistent playback streams for headphone and speaker output."""
     return None, None
 
+
+def create_experiment_playback_controller(device, sample_rate, channels=4):
+    """Create a persistent output stream and shared state for non-blocking trial playback."""
+    playback_state = {
+        'audio': np.zeros((1, channels), dtype=np.float32),
+        'pos': 0,
+    }
+    state_lock = threading.Lock()
+
+    def callback(outdata, frame_count, time_info, status):
+        with state_lock:
+            audio = playback_state['audio']
+            pos = playback_state['pos']
+            end_pos = pos + frame_count
+
+            if pos >= audio.shape[0]:
+                outdata[:] = 0
+                playback_state['pos'] = end_pos
+                return
+
+            if end_pos <= audio.shape[0]:
+                outdata[:] = audio[pos:end_pos]
+                playback_state['pos'] = end_pos
+            else:
+                first = audio[pos:]
+                outdata[:len(first)] = first
+                outdata[len(first):] = 0
+                playback_state['pos'] = audio.shape[0]
+
+    stream = sd.OutputStream(
+        samplerate=sample_rate,
+        device=device,
+        channels=channels,
+        dtype='float32',
+        callback=callback,
+        latency='low',
+    )
+    return stream, playback_state, state_lock
+
+
+def set_experiment_audio(playback_state, state_lock, audio):
+    """Swap in the next trial audio buffer for the persistent playback stream."""
+    with state_lock:
+        playback_state['audio'] = np.asarray(audio, dtype=np.float32)
+        playback_state['pos'] = 0
+
 #load headphone stimuli from /localised_stimuli
 base_dir = os.path.dirname(__file__) if '__file__' in globals() else os.getcwd()
 headphone_dir = os.path.join(base_dir, 'in_situ_stimuli')
@@ -774,6 +820,7 @@ ASIO_SPEAKER_MAPPING = [1, 2]
 ASIO_HEADPHONE_MAPPING = [3, 4]
 headphones_device = ASIO_AGGREGATE_DEVICE
 speakers_device = ASIO_AGGREGATE_DEVICE
+sample_rate = 48000  # Default sample rate for audio playback
 
 #repeat for x trials. each new trial should be on a new row in the results table
 # Run trials in 3 blocks with breaks
@@ -830,20 +877,20 @@ def make_balanced_trial_list(n_trials, max_run=2):
 trial_list = make_balanced_trial_list(number_of_trials, max_run=2)
 
 # Map numeric codes to string labels
-output_map = {0: 'speaker', 1: 'headphone', 2: 'eq_headphone'}
+output_map = {0: 'speaker', 1: 'headphone', 2: 'headphone'}
 stim_type_map = {0: 'noise', 1: 'ISTS', 2: 'environment'}
 
 
 def is_headphone_like(playback_type):
     """Return True for headphone-style presentation methods."""
-    return playback_type in ('headphone', 'eq_headphone')
+    return playback_type == 'headphone'
 
 print(f"\nTrial configuration:")
 print(f"  Total trials: {number_of_trials}")
 print(f"  Blocks: {number_of_blocks}")
 print(f"  Trials per block: {trials_per_block_count}")
 print(f"  Headphone trials: {sum(1 for t in trial_list if t[0] == 1)}")
-print(f"  EQ-headphone trials: {sum(1 for t in trial_list if t[0] == 2)}")
+print(f"  Disabled eq/headphone trials (treated as headphone): {sum(1 for t in trial_list if t[0] == 2)}")
 print(f"  Speaker trials: {sum(1 for t in trial_list if t[0] == 0)}")
 for stim_code, stim_name in stim_type_map.items():
     print(f"  {stim_name.capitalize()} trials: {sum(1 for t in trial_list if t[1] == stim_code)}")
@@ -880,7 +927,8 @@ response_feedback = visual.TextStim(
 headphone_level_offset_db, speaker_level_offset_db = run_loudness_calibration(
     win,
     headphones_device=headphones_device,
-    speakers_device=speakers_device
+    speakers_device=speakers_device,
+    sample_rate=sample_rate
 )
 
 # Display main task instructions after calibration
@@ -909,182 +957,31 @@ event.waitKeys()
 win.flip()
 
 for p in range(practice_trials):
-    # Show fixation cross with ISI
-    fixation.draw()
-    win.flip()
-    core.wait(ISI)
-
-    # Randomly choose playback and stimulus category for practice
-    playback_type = random.choice(['headphone', 'eq_headphone', 'speaker'])
-    stim_category = random.choice(stimulus_types)
-
-    if is_headphone_like(playback_type):
-        stimulus = random.choice(headphone_stimuli[stim_category])
-        device = headphones_device
-    else:
-        stimulus = random.choice(speaker_stimuli[stim_category])
-        device = speakers_device
-
-    response = None
-    rt = 0
-    try:
-        audio_data, fs = sf.read(stimulus)
-        samples_5s = int(5 * fs)
-        audio_5s = audio_data[:samples_5s]
-        gain_db = random.uniform(0, 0) # random gain can be adjusted currently zero
-        if is_headphone_like(playback_type):
-            gain_db += headphone_level_offset_db
-        else:
-            gain_db += speaker_level_offset_db
-        gain_linear = 10 ** (gain_db / 20)
-        audio_5s = audio_5s * gain_linear
-
-        if audio_5s.ndim > 1 and playback_type == 'speaker':
-            audio_5s = audio_5s.mean(axis=1)
-        audio_5s = apply_device_specific_filter(audio_5s, fs, device_type='headphone' if is_headphone_like(playback_type) else 'speaker', order=4)
-
-        if playback_type == 'eq_headphone' and individual_eq_file is not None:
-            audio_5s = apply_individual_eq(audio_5s, individual_eq_file, fs)
- 
-        audio_5s = ensure_stereo(audio_5s)
-        audio_5s = apply_fade(audio_5s, fs, fade_ms=10)
-        audio_5s = append_silence_tail(audio_5s, fs, tail_ms=20)
-
-        print(f"Practice {p+1}/{practice_trials}: {playback_type} via device {device} ({stim_category})")
-
-        # Show only fixation cross initially
-        fixation.draw()
-        win.flip()
-
-        # Route stereo audio to correct ASIO channels (1-2 for speaker, 3-4 for headphone)
-        if is_headphone_like(playback_type):
-            routed_audio = route_to_asio_channels(audio_5s, 'headphone')
-        else:
-            routed_audio = route_to_asio_channels(audio_5s, 'speaker')
-        
-        # Start audio playback using sd.play (same as calibration)
-        sd.play(routed_audio, samplerate=fs, device=device)
-        start_time = time.time()
-        audio_duration = len(routed_audio) / fs
-        
-        # Wait 3 seconds, then show image below fixation cross
-        image_shown = False
-        response = None
-        response_message = ""
-        
-        while True:
-            elapsed_time = time.time() - start_time
-            
-            # Check if 3 seconds has passed and image hasn't been shown yet
-            if not image_shown and elapsed_time >= 3.0:
-                image_shown = True
-            
-            # Only check for responses AFTER image is shown (after 3 seconds)
-            if image_shown and response is None:
-                keys = event.getKeys(keyList=['up', 'down', 'escape'], timeStamped=False)
-                if keys:
-                    if 'escape' in keys:
-                        sd.stop()
-                        win.close()
-                        core.quit()
-                    if 'up' in keys:
-                        response = 'up'
-                        rt = elapsed_time
-                        response_message = "response recorded - loudspeaker"
-                    elif 'down' in keys:
-                        response = 'down'
-                        rt = elapsed_time
-                        response_message = "response recorded - headphone"
-            elif not image_shown:
-                # Clear any key presses before 3 seconds (ignore them)
-                event.getKeys()
-
-            fixation.draw()
-            if image_shown and info_image:
-                info_image.draw()
-            if image_shown and response_message:
-                response_feedback.setText(response_message)
-                response_feedback.draw()
-            win.flip()
-
-            # Playback always runs to completion regardless of response timing
-            if elapsed_time >= audio_duration:
-                break
-            
-            core.wait(0.01)  # Small delay to prevent CPU overload
-
-        # Require a response before advancing to next trial
-        while response is None:
-            keys = event.getKeys(keyList=['up', 'down', 'escape'], timeStamped=False)
-            if keys:
-                if 'escape' in keys:
-                    sd.stop()
-                    win.close()
-                    core.quit()
-                if 'up' in keys:
-                    response = 'up'
-                    rt = time.time() - start_time
-                    response_message = "response recorded - loudspeaker"
-                elif 'down' in keys:
-                    response = 'down'
-                    rt = time.time() - start_time
-                    response_message = "response recorded - headphone"
-
-            fixation.draw()
-            if info_image:
-                info_image.draw()
-            response_feedback.setText(response_message if response_message else "please respond: up=loudspeaker, down=headphone")
-            response_feedback.draw()
-            win.flip()
-            core.wait(0.01)
-
-    except Exception as e:
-        print(f"Error playing practice stimulus {stimulus} ({playback_type}, device {device}): {e}")
-        sd.stop()  # Ensure audio is stopped on error
-        continue
-
-    if (response == 'up' and playback_type == 'speaker') or (response == 'down' and is_headphone_like(playback_type)):
-        accuracy = 1
-    else:
-        accuracy = 0
-
-    # Save practice trial (trial_type='practice', block=None)
-    append_result(playback_type, stimulus, response, rt, accuracy,
-                 stimulus_category=stim_category, gain_db=gain_db, trial_type='practice', block=None)
-
-# --- End practice trials ---
-
-# --- Main experimental trials ---
-trial_index = 0  # Separate counter for indexing trial_list
-
-for block in range(number_of_blocks):
-    for i in range(trials_per_block_count):
         # Show fixation cross with ISI
         fixation.draw()
         win.flip()
         core.wait(ISI)
-        
-        # Get trial configuration: [output, stim_type]
-        output_code, stim_type_code = trial_list[trial_index]
-        playback_type = output_map[output_code]
-        stim_category = stim_type_map[stim_type_code]
-        
+
+        # Randomly choose playback and stimulus category for practice
+        playback_type = random.choice(['headphone', 'speaker'])
+        stim_category = random.choice(stimulus_types)
+
         if is_headphone_like(playback_type):
             stimulus = random.choice(headphone_stimuli[stim_category])
             device = headphones_device
+            mapping = ASIO_HEADPHONE_MAPPING
         else:
             stimulus = random.choice(speaker_stimuli[stim_category])
-            device = speakers_device 
-        
-        response = None  # Initialize response variable
+            device = speakers_device
+            mapping = ASIO_SPEAKER_MAPPING
+
+        response = None
         rt = 0
         try:
             audio_data, fs = sf.read(stimulus)
-            # Play only first 5 seconds
             samples_5s = int(5 * fs)
             audio_5s = audio_data[:samples_5s]
-            # Apply random gain between -5 and +5 dB
-            gain_db = random.uniform(-2 , 2)
+            gain_db = random.uniform(0, 0) # random gain can be adjusted currently zero
             if is_headphone_like(playback_type):
                 gain_db += headphone_level_offset_db
             else:
@@ -1096,45 +993,32 @@ for block in range(number_of_blocks):
                 audio_5s = audio_5s.mean(axis=1)
             audio_5s = apply_device_specific_filter(audio_5s, fs, device_type='headphone' if is_headphone_like(playback_type) else 'speaker', order=4)
 
-            if playback_type == 'eq_headphone': #and individual_eq_file is not None:
-                audio_5s = apply_individual_eq(audio_5s, individual_eq_file, fs)
-  
+            if playback_type == 'speaker':
+                audio_5s = collapse_to_left_channel(audio_5s, preserve_total_rms=True)
+
             audio_5s = ensure_stereo(audio_5s)
-            audio_5s = apply_fade(audio_5s, fs, fade_ms=10)
+            audio_5s = apply_fade(audio_5s, fs, fade_ms=20)
             audio_5s = append_silence_tail(audio_5s, fs, tail_ms=20)
 
-            # Explicitly set output device (leave input as default)
-            # Debug: log routing
-            print(f"Trial {trial_index+1}/{number_of_trials}: {playback_type} via device {device} ({stim_category})")
-            
-            # Show only fixation cross initially
+            print(f"Practice {p+1}/{practice_trials}: {playback_type} via device {device} ({stim_category})")
+
             fixation.draw()
             win.flip()
-            
-            # Route stereo audio to correct ASIO channels (1-2 for speaker, 3-4 for headphone)
-            if is_headphone_like(playback_type):
-                routed_audio = route_to_asio_channels(audio_5s, 'headphone')
-            else:
-                routed_audio = route_to_asio_channels(audio_5s, 'speaker')
-            
-            # Start audio playback using sd.play (same as calibration)
-            sd.play(routed_audio, samplerate=fs, device=device)
+
+            sd.play(audio_5s, samplerate=fs, device=device, mapping=mapping)
             start_time = time.time()
-            audio_duration = len(routed_audio) / fs
-            
-            # Wait 3 seconds, then show image below fixation cross
+            audio_duration = len(audio_5s) / fs
+
             image_shown = False
             response = None
             response_message = ""
-            
+
             while True:
                 elapsed_time = time.time() - start_time
-                
-                # Check if 3 seconds has passed and image hasn't been shown yet
+
                 if not image_shown and elapsed_time >= 3.0:
                     image_shown = True
-                
-                # Only check for responses AFTER image is shown (after 3 seconds)
+
                 if image_shown and response is None:
                     keys = event.getKeys(keyList=['up', 'down', 'escape'], timeStamped=False)
                     if keys:
@@ -1151,7 +1035,6 @@ for block in range(number_of_blocks):
                             rt = elapsed_time
                             response_message = "response recorded - headphone"
                 elif not image_shown:
-                    # Clear any key presses before 3 seconds (ignore them)
                     event.getKeys()
 
                 fixation.draw()
@@ -1162,13 +1045,13 @@ for block in range(number_of_blocks):
                     response_feedback.draw()
                 win.flip()
 
-                # Playback always runs to completion regardless of response timing
                 if elapsed_time >= audio_duration:
                     break
-                
-                core.wait(0.01)  # Small delay to prevent CPU overload
 
-            # Require a response before advancing to next trial
+                core.wait(0.01)
+
+            sd.wait()
+
             while response is None:
                 keys = event.getKeys(keyList=['up', 'down', 'escape'], timeStamped=False)
                 if keys:
@@ -1185,41 +1068,235 @@ for block in range(number_of_blocks):
                         rt = time.time() - start_time
                         response_message = "response recorded - headphone"
 
-            fixation.draw()
-            if info_image:
-                info_image.draw()
-            response_feedback.setText(response_message if response_message else "please respond: up=loudspeaker, down=headphone")
-            response_feedback.draw()
-            win.flip()
-            core.wait(0.01)
+                fixation.draw()
+                if info_image:
+                    info_image.draw()
+                response_feedback.setText(response_message if response_message else "please respond: up=loudspeaker, down=headphone")
+                response_feedback.draw()
+                win.flip()
+                core.wait(0.01)
 
         except Exception as e:
-            print(f"Error playing stimulus {stimulus} ({playback_type}, device {device}): {e}")
-            sd.stop()  # Ensure audio is stopped on error
-            trial_index += 1  # Still increment to avoid getting stuck
-            continue  # Skip this trial if error occurs
+            print(f"Error playing practice stimulus {stimulus}: {e}")
+            sd.stop()
+            continue
 
-        if (response == 'up' and playback_type == 'speaker') or (response == 'down' and is_headphone_like(playback_type)):
-            accuracy = 1
+# --- End practice trials ---
+
+# --- Main experimental trials ---
+trial_index = 0
+
+# Create a persistent output stream for trial playback (4 channels for headphone + speaker)
+trial_playback_state = {
+    'audio': np.zeros((1, 4), dtype=np.float32),
+    'pos': 0,
+    'audio_duration_samples': 0,
+}
+trial_state_lock = threading.Lock()
+
+def trial_playback_callback(outdata, frame_count, time_info, status):
+    """Callback for continuous trial playback stream."""
+    with trial_state_lock:
+        audio = trial_playback_state['audio']
+        pos = trial_playback_state['pos']
+        audio_duration = trial_playback_state['audio_duration_samples']
+        end_pos = pos + frame_count
+
+        # If we've reached the end of the audio, output silence
+        if pos >= audio_duration:
+            outdata[:] = 0
+            trial_playback_state['pos'] = end_pos
+            return
+
+        # If the requested frame count fits within remaining audio
+        if end_pos <= audio_duration:
+            outdata[:] = audio[pos:end_pos]
+            trial_playback_state['pos'] = end_pos
         else:
-            accuracy = 0
+            # Output remaining audio and pad with silence
+            first = audio[pos:audio_duration]
+            outdata[:len(first)] = first
+            outdata[len(first):] = 0
+            trial_playback_state['pos'] = audio_duration
 
-        # Save experimental trial (trial_type='experimental', block=block number)
-        append_result(playback_type, stimulus, response, rt, accuracy,
-                     stimulus_category=stim_category, gain_db=gain_db, trial_type='experimental', block=block+1)
-        trial_index += 1  # Increment after successful trial
+# Open the persistent trial playback stream
+trial_stream = sd.OutputStream(
+    samplerate=sample_rate,
+    device=ASIO_AGGREGATE_DEVICE,
+    channels=4,
+    dtype='float32',
+    callback=trial_playback_callback,
+    latency='low',
+)
+trial_stream.start()
 
-    # Display break message after each block (except the last)
-    if block < (number_of_blocks - 1):
-        break_msg = visual.TextStim(
-            win,
-            text=f"You're {block + 1}/{number_of_blocks} of the way through.\n\nTake a break.\n\nPress any key to continue.",
-            color='white',
-            height=30
-        )
-        break_msg.draw()
-        win.flip()
-        event.waitKeys()
+try:
+    for block in range(number_of_blocks):
+        for i in range(trials_per_block_count):
+            # Show fixation cross with ISI
+            fixation.draw()
+            win.flip()
+            core.wait(ISI)
+            
+            # Get trial configuration: [output, stim_type]
+            output_code, stim_type_code = trial_list[trial_index]
+            playback_type = output_map[output_code]
+            stim_category = stim_type_map[stim_type_code]
+            
+            if is_headphone_like(playback_type):
+                stimulus = random.choice(headphone_stimuli[stim_category])
+            else:
+                stimulus = random.choice(speaker_stimuli[stim_category])
+            
+            response = None  # Initialize response variable
+            rt = 0
+            try:
+                audio_data, fs = sf.read(stimulus)
+                # Play only first 5 seconds
+                samples_5s = int(5 * fs)
+                audio_5s = audio_data[:samples_5s]
+                # Apply random gain between -5 and +5 dB
+                gain_db = random.uniform(-2 , 2)
+                if is_headphone_like(playback_type):
+                    gain_db += headphone_level_offset_db
+                else:
+                    gain_db += speaker_level_offset_db
+                gain_linear = 10 ** (gain_db / 20)
+                audio_5s = audio_5s * gain_linear
+
+                if audio_5s.ndim > 1 and playback_type == 'speaker':
+                    audio_5s = audio_5s.mean(axis=1)
+                audio_5s = apply_device_specific_filter(audio_5s, fs, device_type='headphone' if is_headphone_like(playback_type) else 'speaker', order=4)
+
+                if playback_type == 'speaker':
+                    audio_5s = collapse_to_left_channel(audio_5s, preserve_total_rms=True)
+
+                audio_5s = ensure_stereo(audio_5s)
+                audio_5s = apply_fade(audio_5s, fs, fade_ms=20)
+                audio_5s = append_silence_tail(audio_5s, fs, tail_ms=20)
+                
+                # Route audio to appropriate ASIO channels
+                routed_audio = route_to_asio_channels(audio_5s, playback_type)
+
+                # Debug: log routing
+                print(f"Trial {trial_index+1}/{number_of_trials}: {playback_type} ({stim_category})")
+                
+                # Set up playback state with the new audio
+                with trial_state_lock:
+                    trial_playback_state['audio'] = routed_audio.astype(np.float32)
+                    trial_playback_state['pos'] = 0
+                    trial_playback_state['audio_duration_samples'] = routed_audio.shape[0]
+                
+                # Show only fixation cross initially
+                fixation.draw()
+                win.flip()
+                
+                start_time = time.time()
+                audio_duration = len(audio_5s) / fs
+                
+                # Wait 3 seconds, then show image below fixation cross
+                image_shown = False
+                response = None
+                response_message = ""
+                
+                while True:
+                    elapsed_time = time.time() - start_time
+                    
+                    # Check if 3 seconds has passed and image hasn't been shown yet
+                    if not image_shown and elapsed_time >= 3.0:
+                        image_shown = True
+                    
+                    # Only check for responses AFTER image is shown (after 3 seconds)
+                    if image_shown and response is None:
+                        keys = event.getKeys(keyList=['up', 'down', 'escape'], timeStamped=False)
+                        if keys:
+                            if 'escape' in keys:
+                                trial_stream.stop()
+                                trial_stream.close()
+                                win.close()
+                                core.quit()
+                            if 'up' in keys:
+                                response = 'up'
+                                rt = elapsed_time
+                                response_message = "response recorded - loudspeaker"
+                            elif 'down' in keys:
+                                response = 'down'
+                                rt = elapsed_time
+                                response_message = "response recorded - headphone"
+                    elif not image_shown:
+                        # Clear any key presses before 3 seconds (ignore them)
+                        event.getKeys()
+
+                    fixation.draw()
+                    if image_shown and info_image:
+                        info_image.draw()
+                    if image_shown and response_message:
+                        response_feedback.setText(response_message)
+                        response_feedback.draw()
+                    win.flip()
+
+                    # Playback always runs to completion regardless of response timing
+                    if elapsed_time >= audio_duration:
+                        break
+                    
+                    core.wait(0.01)  # Small delay to prevent CPU overload
+
+                # Require a response before advancing to next trial
+                while response is None:
+                    keys = event.getKeys(keyList=['up', 'down', 'escape'], timeStamped=False)
+                    if keys:
+                        if 'escape' in keys:
+                            trial_stream.stop()
+                            trial_stream.close()
+                            win.close()
+                            core.quit()
+                        if 'up' in keys:
+                            response = 'up'
+                            rt = time.time() - start_time
+                            response_message = "response recorded - loudspeaker"
+                        elif 'down' in keys:
+                            response = 'down'
+                            rt = time.time() - start_time
+                            response_message = "response recorded - headphone"
+
+                    fixation.draw()
+                    if info_image:
+                        info_image.draw()
+                    response_feedback.setText(response_message if response_message else "please respond: up=loudspeaker, down=headphone")
+                    response_feedback.draw()
+                    win.flip()
+                    core.wait(0.01)
+
+            except Exception as e:
+                print(f"Error playing stimulus {stimulus} ({playback_type}): {e}")
+                trial_index += 1
+                continue
+
+            if (response == 'up' and playback_type == 'speaker') or (response == 'down' and is_headphone_like(playback_type)):
+                accuracy = 1
+            else:
+                accuracy = 0
+
+            append_result(playback_type, stimulus, response, rt, accuracy,
+                         stimulus_category=stim_category, gain_db=gain_db, trial_type='experimental', block=block+1)
+            trial_index += 1
+
+        if block < (number_of_blocks - 1):
+            break_msg = visual.TextStim(
+                win,
+                text=f"You're {block + 1}/{number_of_blocks} of the way through.\n\nTake a break.\n\nPress any key to continue.",
+                color='white',
+                height=30
+            )
+            break_msg.draw()
+            win.flip()
+            event.waitKeys()
+
+finally:
+    # Close trial stream
+    if trial_stream:
+        trial_stream.stop()
+        trial_stream.close()
 
 # --- End of experiment ---
 print("\nExperiment complete!")
@@ -1238,9 +1315,6 @@ win.flip()
 # Wait for any key press before closing
 event.waitKeys()
 
-# Stop any active playback before exit.
-sd.stop()
- 
 # Close window and quit
 win.close()
 core.quit()
