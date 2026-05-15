@@ -6,7 +6,7 @@ import time
 import numpy as np
 import random
 import os, glob
-os.environ["SD_ENABLE_ASIO"] = "1"
+os.environ["SD_ENABLE_ASIO"] = "1" #this line is important as it allows revelation of asio devices
 import sounddevice as sd
 
 import soundfile as sf
@@ -156,11 +156,11 @@ def ensure_stereo(audio):
 
 
 def route_to_asio_channels(audio, device_role):
-    """Route stereo audio to ASIO channels 1-2 for loudspeaker or 3-4 for headphone."""
+    """Route stereo audio to ASIO channel 1 for loudspeaker or channels 3-4 for headphone."""
     audio = ensure_stereo(np.asarray(audio))
     routed = np.zeros((audio.shape[0], 4), dtype=np.float32)
     if device_role == 'speaker':
-        routed[:, 0:2] = audio[:, :2]
+        routed[:, 0] = audio[:, 0]  # Left channel to ASIO channel 1 only
     elif device_role == 'headphone':
         routed[:, 2:4] = audio[:, :2]
     else:
@@ -172,7 +172,7 @@ def collapse_to_left_channel(audio, preserve_total_rms=True):
     """
     Collapse audio to left channel only for loudspeaker playback.
 
-    Converts stereo/mono to stereo with left = audio, right = 0 (silence).
+    Converts stereo/mono to stereo with left = audio, right = 0 (silence).    
 
     Args:
         audio: Audio array (mono or stereo)
@@ -346,43 +346,52 @@ def run_loudness_calibration(win, headphones_device, speakers_device, sample_rat
 
     speaker_audio = make_speaker_audio().astype(np.float32)
 
-    # Main calibration loop - play alternating audio while allowing button adjustments
+    def build_cycle_audio():
+        headphone_audio = make_headphone_audio(headphone_offset_db).astype(np.float32)
+        headphone_routed = route_to_asio_channels(headphone_audio, 'headphone')
+        speaker_routed = route_to_asio_channels(speaker_audio, 'speaker')
+        cycle = np.concatenate([headphone_routed, speaker_routed], axis=0)
+        return np.concatenate([cycle, cycle], axis=0)
+
+    playback_state = {
+        'audio': build_cycle_audio(),
+        'pos': 0,
+        'rebuild': False,
+    }
+
+    def calibration_callback(outdata, frame_count, time_info, status):
+        audio = playback_state['audio']
+        pos = playback_state['pos']
+        end_pos = pos + frame_count
+        if end_pos <= audio.shape[0]:
+            outdata[:] = audio[pos:end_pos]
+            playback_state['pos'] = end_pos
+        else:
+            first = audio[pos:]
+            if playback_state['rebuild']:
+                playback_state['audio'] = build_cycle_audio()
+                playback_state['rebuild'] = False
+                audio = playback_state['audio']
+            remaining = frame_count - len(first)
+            second = audio[:remaining]
+            outdata[:len(first)] = first
+            outdata[len(first):] = second
+            playback_state['pos'] = remaining
+
+    # Main calibration loop - continuous looping playback with live button polling
     try:
-        while not store_selected:
-            # Play speaker audio
-            print("Playing speaker (channels 1-2)...")
-            draw_calibration_screen("Playing loudspeaker...", "Playing: LOUDSPEAKER")
-            try:
-                play_audio_on_device(speaker_audio, sample_rate, speakers_device, mapping=[1, 2])
-            except Exception as e:
-                print(f"Error playing speaker: {e}")
-                raise
-
-            # Check for button press during inter-stimulus interval
-            for _ in range(5):
-                draw_calibration_screen("Adjusting...", "")
+        with sd.OutputStream(
+            samplerate=sample_rate,
+            device=speakers_device,
+            channels=4,
+            dtype='float32',
+            callback=calibration_callback,
+            latency='low',
+        ):
+            while not store_selected:
                 maybe_handle_click()
-                core.wait(0.2)
-            
-            if store_selected:
-                break
-
-            # Play headphone audio
-            print("Playing headphone (channels 3-4)...")
-            hp_offset = headphone_offset_db
-            headphone_audio = make_headphone_audio(hp_offset).astype(np.float32)
-            draw_calibration_screen("Playing headphone...", "Playing: HEADPHONE")
-            try:
-                play_audio_on_device(headphone_audio, sample_rate, headphones_device, mapping=[3, 4])
-            except Exception as e:
-                print(f"Error playing headphone: {e}")
-                raise
-
-            # Check for button press during inter-stimulus interval
-            for _ in range(5):
-                draw_calibration_screen("Adjusting...", "")
-                maybe_handle_click()
-                core.wait(0.2)
+                draw_calibration_screen("Adjust headphone level during playback; Store ends calibration immediately.", "Playing: HEADPHONE -> LOUDSPEAKER")
+                core.wait(0.01)
     finally:
         sd.stop()
 
@@ -411,10 +420,9 @@ def create_playback_streams(headphones_device, speakers_device, sample_rate):
 
 #load headphone stimuli from /localised_stimuli
 base_dir = os.path.dirname(__file__) if '__file__' in globals() else os.getcwd()
-headphone_dir = os.path.join(base_dir, 'normalised_localised')
-speaker_dir = os.path.join(base_dir, 'normalised_loudspeaker')
-
-_audio_exts = ('*.wav', '*.flac', '*.mp3', '*.aiff', '*.ogg')
+headphone_dir = os.path.join(base_dir, 'in_situ_stimuli')
+speaker_dir = os.path.join(base_dir, 'loudspeaker_stimuli')
+_audio_exts = ('*.wav', '*.flac', '*.mp3', '*.aiff', '*.ogg') 
 
 
 def _list_audio(folder):
@@ -948,20 +956,16 @@ for p in range(practice_trials):
         fixation.draw()
         win.flip()
 
-        # START AUDIO PLAYBACK (non-blocking) and start timing immediately
-        playback_error = None
-        playback_thread = threading.Thread(
-            target=lambda: play_audio_on_device(
-                audio_5s,
-                fs,
-                device,
-                mapping=[3, 4] if is_headphone_like(playback_type) else [1, 2],
-            ),
-            daemon=True,
-        )
-        playback_thread.start()
+        # Route stereo audio to correct ASIO channels (1-2 for speaker, 3-4 for headphone)
+        if is_headphone_like(playback_type):
+            routed_audio = route_to_asio_channels(audio_5s, 'headphone')
+        else:
+            routed_audio = route_to_asio_channels(audio_5s, 'speaker')
+        
+        # Start audio playback using sd.play (same as calibration)
+        sd.play(routed_audio, samplerate=fs, device=device)
         start_time = time.time()
-        audio_duration = len(audio_5s) / fs
+        audio_duration = len(routed_audio) / fs
         
         # Wait 3 seconds, then show image below fixation cross
         image_shown = False
@@ -1008,8 +1012,6 @@ for p in range(practice_trials):
                 break
             
             core.wait(0.01)  # Small delay to prevent CPU overload
-
-        playback_thread.join(timeout=2.0)
 
         # Require a response before advancing to next trial
         while response is None:
@@ -1109,20 +1111,16 @@ for block in range(number_of_blocks):
             fixation.draw()
             win.flip()
             
-            # Start audio playback (non-blocking) and start timing immediately
-            playback_error = None
-            playback_thread = threading.Thread(
-                target=lambda: play_audio_on_device(
-                    audio_5s,
-                    fs,
-                    device,
-                    mapping=[3, 4] if is_headphone_like(playback_type) else [1, 2],
-                ),
-                daemon=True,
-            )
-            playback_thread.start()
+            # Route stereo audio to correct ASIO channels (1-2 for speaker, 3-4 for headphone)
+            if is_headphone_like(playback_type):
+                routed_audio = route_to_asio_channels(audio_5s, 'headphone')
+            else:
+                routed_audio = route_to_asio_channels(audio_5s, 'speaker')
+            
+            # Start audio playback using sd.play (same as calibration)
+            sd.play(routed_audio, samplerate=fs, device=device)
             start_time = time.time()
-            audio_duration = len(audio_5s) / fs
+            audio_duration = len(routed_audio) / fs
             
             # Wait 3 seconds, then show image below fixation cross
             image_shown = False
@@ -1169,8 +1167,6 @@ for block in range(number_of_blocks):
                     break
                 
                 core.wait(0.01)  # Small delay to prevent CPU overload
-
-            playback_thread.join(timeout=2.0)
 
             # Require a response before advancing to next trial
             while response is None:

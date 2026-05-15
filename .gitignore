@@ -24,9 +24,9 @@ results/*.csv
 
 # Audio files (if large)
 # Uncomment if you don't want to push audio files:
-*.wav
+#*.wav
  *.flac
- *.mp3
+# *.mp3
  *.aiff
  *.ogg
 *.sofa
