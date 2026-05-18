@@ -161,7 +161,7 @@ def route_to_asio_channels(audio, device_role):
     routed = np.zeros((audio.shape[0], 4), dtype=np.float32)
     if device_role == 'speaker':
         routed[:, 0] = audio[:, 0]  # Left channel to ASIO channel 1 only
-    elif device_role == 'headphone':
+    elif device_role in ['in_situ_headphone', 'ex_situ_headphone']:
         routed[:, 2:4] = audio[:, :2]
     else:
         raise ValueError(f"Unknown device_role: {device_role}")
@@ -348,7 +348,7 @@ def run_loudness_calibration(win, headphones_device, speakers_device, sample_rat
 
     def build_cycle_audio():
         headphone_audio = make_headphone_audio(headphone_offset_db).astype(np.float32)
-        headphone_routed = route_to_asio_channels(headphone_audio, 'headphone')
+        headphone_routed = route_to_asio_channels(headphone_audio, 'in_situ_headphone')
         speaker_routed = route_to_asio_channels(speaker_audio, 'speaker')
         cycle = np.concatenate([headphone_routed, speaker_routed], axis=0)
         return np.concatenate([cycle, cycle], axis=0)
@@ -466,8 +466,9 @@ def set_experiment_audio(playback_state, state_lock, audio):
 
 #load headphone stimuli from /localised_stimuli
 base_dir = os.path.dirname(__file__) if '__file__' in globals() else os.getcwd()
-headphone_dir = os.path.join(base_dir, 'in_situ_audios_lab_open_ear_0.05rms')
-speaker_dir = os.path.join(base_dir, 'loudspeaker_stimuli_0.1rms')
+in_situ_headphone_dir = os.path.join(base_dir, 'in_situ_norm.05')
+ex_situ_headphone_dir = os.path.join(base_dir, 'ex_situ_norm0.05')
+speaker_dir = os.path.join(base_dir, 'loudspeaker_norm0.1')
 _audio_exts = ('*.wav', '*.flac', '*.mp3', '*.aiff', '*.ogg') 
 
 
@@ -481,18 +482,23 @@ def _list_audio(folder):
 # Load stimuli by type (environment, ISTS, noise) for both headphone and speaker
 stimulus_types = ['environment', 'ISTS', 'noise']
 
-headphone_stimuli = {}
+in_situ_headphone_stimuli = {}
+ex_situ_headphone_stimuli = {}
 speaker_stimuli = {}
 
 for stim_type in stimulus_types:
-    headphone_stimuli[stim_type] = _list_audio(os.path.join(headphone_dir, stim_type))
+    in_situ_headphone_stimuli[stim_type] = _list_audio(os.path.join(in_situ_headphone_dir, stim_type))
+    ex_situ_headphone_stimuli[stim_type] = _list_audio(os.path.join(ex_situ_headphone_dir, stim_type))
     speaker_stimuli[stim_type] = _list_audio(os.path.join(speaker_dir, stim_type))
-    print(f"Loaded {len(headphone_stimuli[stim_type])} headphone {stim_type} stimuli")
+    print(f"Loaded {len(in_situ_headphone_stimuli[stim_type])} in_situ_headphone {stim_type} stimuli")
+    print(f"Loaded {len(ex_situ_headphone_stimuli[stim_type])} ex_situ_headphone {stim_type} stimuli")
     print(f"Loaded {len(speaker_stimuli[stim_type])} speaker {stim_type} stimuli")
     
     # Check for empty stimulus lists
-    if len(headphone_stimuli[stim_type]) == 0:
-        print(f"  WARNING: No headphone {stim_type} files found in {os.path.join(headphone_dir, stim_type)}")
+    if len(in_situ_headphone_stimuli[stim_type]) == 0:
+        print(f"  WARNING: No in_situ_headphone {stim_type} files found in {os.path.join(in_situ_headphone_dir, stim_type)}")
+    if len(ex_situ_headphone_stimuli[stim_type]) == 0:
+        print(f"  WARNING: No ex_situ_headphone {stim_type} files found in {os.path.join(ex_situ_headphone_dir, stim_type)}")
     if len(speaker_stimuli[stim_type]) == 0:
         print(f"  WARNING: No speaker {stim_type} files found in {os.path.join(speaker_dir, stim_type)}")
 
@@ -517,7 +523,7 @@ results = pd.DataFrame(columns=[
     'trial_number',         # trial number (includes practice)
     'trial_type',           # 'practice' or 'experimental'
     'block',                # block number (None for practice)
-    'presentation_type',    # 'speaker', 'headphone', or 'eq_headphone'
+    'presentation_type',    # 'speaker', 'in_situ_headphone', or 'ex_situ_headphone'
     'stimulus',             # stimulus filename or ID
     'stimulus_category',    # environment, ISTS, or noise
     'gain_db',              # gain applied to stimulus in dB
@@ -877,21 +883,21 @@ def make_balanced_trial_list(n_trials, max_run=2):
 trial_list = make_balanced_trial_list(number_of_trials, max_run=2)
 
 # Map numeric codes to string labels
-output_map = {0: 'speaker', 1: 'headphone', 2: 'headphone'}
+output_map = {0: 'speaker', 1: 'in_situ_headphone', 2: 'ex_situ_headphone'}
 stim_type_map = {0: 'noise', 1: 'ISTS', 2: 'environment'}
 
 
 def is_headphone_like(playback_type):
     """Return True for headphone-style presentation methods."""
-    return playback_type == 'headphone'
+    return playback_type in ['in_situ_headphone', 'ex_situ_headphone']
 
 print(f"\nTrial configuration:")
 print(f"  Total trials: {number_of_trials}")
 print(f"  Blocks: {number_of_blocks}")
 print(f"  Trials per block: {trials_per_block_count}")
-print(f"  Headphone trials: {sum(1 for t in trial_list if t[0] == 1)}")
-print(f"  Disabled eq/headphone trials (treated as headphone): {sum(1 for t in trial_list if t[0] == 2)}")
 print(f"  Speaker trials: {sum(1 for t in trial_list if t[0] == 0)}")
+print(f"  In-situ headphone trials: {sum(1 for t in trial_list if t[0] == 1)}")
+print(f"  Ex-situ headphone trials: {sum(1 for t in trial_list if t[0] == 2)}")
 for stim_code, stim_name in stim_type_map.items():
     print(f"  {stim_name.capitalize()} trials: {sum(1 for t in trial_list if t[1] == stim_code)}")
 output_preview = [output_map[t[0]] for t in trial_list[:12]]
@@ -963,14 +969,18 @@ for p in range(practice_trials):
         core.wait(ISI)
 
         # Randomly choose playback and stimulus category for practice
-        playback_type = random.choice(['headphone', 'speaker'])
+        playback_type = random.choice(['in_situ_headphone', 'ex_situ_headphone', 'speaker'])
         stim_category = random.choice(stimulus_types)
 
-        if is_headphone_like(playback_type):
-            stimulus = random.choice(headphone_stimuli[stim_category])
+        if playback_type == 'in_situ_headphone':
+            stimulus = random.choice(in_situ_headphone_stimuli[stim_category])
             device = headphones_device
             mapping = ASIO_HEADPHONE_MAPPING
-        else:
+        elif playback_type == 'ex_situ_headphone':
+            stimulus = random.choice(ex_situ_headphone_stimuli[stim_category])
+            device = headphones_device
+            mapping = ASIO_HEADPHONE_MAPPING
+        else:  # speaker
             stimulus = random.choice(speaker_stimuli[stim_category])
             device = speakers_device
             mapping = ASIO_SPEAKER_MAPPING
@@ -1143,9 +1153,11 @@ try:
             playback_type = output_map[output_code]
             stim_category = stim_type_map[stim_type_code]
             
-            if is_headphone_like(playback_type):
-                stimulus = random.choice(headphone_stimuli[stim_category])
-            else:
+            if playback_type == 'in_situ_headphone':
+                stimulus = random.choice(in_situ_headphone_stimuli[stim_category])
+            elif playback_type == 'ex_situ_headphone':
+                stimulus = random.choice(ex_situ_headphone_stimuli[stim_category])
+            else:  # speaker
                 stimulus = random.choice(speaker_stimuli[stim_category])
             
             response = None  # Initialize response variable
