@@ -833,7 +833,7 @@ sample_rate = 48000  # Default sample rate for audio playback
 practice_trials = 5
 
 # Generate balanced trial list
-number_of_trials = 27 # keep this at 99 for full experiment. multiple of 9
+number_of_trials = 90 # keep this at 99 for full experiment. multiple of 9
 number_of_blocks = 3
 trials_per_block_count = number_of_trials // number_of_blocks
 
@@ -962,7 +962,47 @@ win.flip()
 event.waitKeys()
 win.flip()
 
-for p in range(practice_trials):
+# Use a persistent stream for practice to avoid start/stop clicks from sd.play/sd.stop.
+practice_playback_state = {
+    'audio': np.zeros((1, 4), dtype=np.float32),
+    'pos': 0,
+    'audio_duration_samples': 0,
+}
+practice_state_lock = threading.Lock()
+
+def practice_playback_callback(outdata, frame_count, time_info, status):
+    with practice_state_lock:
+        audio = practice_playback_state['audio']
+        pos = practice_playback_state['pos']
+        audio_duration = practice_playback_state['audio_duration_samples']
+        end_pos = pos + frame_count
+
+        if pos >= audio_duration:
+            outdata[:] = 0
+            practice_playback_state['pos'] = end_pos
+            return
+
+        if end_pos <= audio_duration:
+            outdata[:] = audio[pos:end_pos]
+            practice_playback_state['pos'] = end_pos
+        else:
+            first = audio[pos:audio_duration]
+            outdata[:len(first)] = first
+            outdata[len(first):] = 0
+            practice_playback_state['pos'] = audio_duration
+
+practice_stream = sd.OutputStream(
+    samplerate=sample_rate,
+    device=ASIO_AGGREGATE_DEVICE,
+    channels=4,
+    dtype='float32',
+    callback=practice_playback_callback,
+    latency='low',
+)
+practice_stream.start()
+
+try:
+    for p in range(practice_trials):
         # Show fixation cross with ISI
         fixation.draw()
         win.flip()
@@ -1009,13 +1049,18 @@ for p in range(practice_trials):
             audio_5s = ensure_stereo(audio_5s)
             audio_5s = apply_fade(audio_5s, fs, fade_ms=20)
             audio_5s = append_silence_tail(audio_5s, fs, tail_ms=20)
+            routed_audio = route_to_asio_channels(audio_5s, playback_type)
 
             print(f"Practice {p+1}/{practice_trials}: {playback_type} via device {device} ({stim_category})")
+
+            with practice_state_lock:
+                practice_playback_state['audio'] = routed_audio.astype(np.float32)
+                practice_playback_state['pos'] = 0
+                practice_playback_state['audio_duration_samples'] = routed_audio.shape[0]
 
             fixation.draw()
             win.flip()
 
-            sd.play(audio_5s, samplerate=fs, device=device, mapping=mapping)
             start_time = time.time()
             audio_duration = len(audio_5s) / fs
 
@@ -1033,7 +1078,8 @@ for p in range(practice_trials):
                     keys = event.getKeys(keyList=['up', 'down', 'escape'], timeStamped=False)
                     if keys:
                         if 'escape' in keys:
-                            sd.stop()
+                            practice_stream.stop()
+                            practice_stream.close()
                             win.close()
                             core.quit()
                         if 'up' in keys:
@@ -1060,13 +1106,12 @@ for p in range(practice_trials):
 
                 core.wait(0.01)
 
-            sd.wait()
-
             while response is None:
                 keys = event.getKeys(keyList=['up', 'down', 'escape'], timeStamped=False)
                 if keys:
                     if 'escape' in keys:
-                        sd.stop()
+                        practice_stream.stop()
+                        practice_stream.close()
                         win.close()
                         core.quit()
                     if 'up' in keys:
@@ -1088,8 +1133,10 @@ for p in range(practice_trials):
 
         except Exception as e:
             print(f"Error playing practice stimulus {stimulus}: {e}")
-            sd.stop()
             continue
+finally:
+    practice_stream.stop()
+    practice_stream.close()
 
 # --- End practice trials ---
 
