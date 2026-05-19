@@ -466,9 +466,9 @@ def set_experiment_audio(playback_state, state_lock, audio):
 
 #load headphone stimuli from /localised_stimuli
 base_dir = os.path.dirname(__file__) if '__file__' in globals() else os.getcwd()
-in_situ_headphone_dir = os.path.join(base_dir, 'in_situ_norm.05')
-ex_situ_headphone_dir = os.path.join(base_dir, 'ex_situ_norm0.05')
-speaker_dir = os.path.join(base_dir, 'loudspeaker_norm0.1')
+in_situ_headphone_dir = os.path.join(base_dir, 'in_situ_stimuli_bob')
+ex_situ_headphone_dir = os.path.join(base_dir, 'ex_situ_stimuli_bob')
+speaker_dir = os.path.join(base_dir, 'loudspeaker_stimuli_bob')
 _audio_exts = ('*.wav', '*.flac', '*.mp3', '*.aiff', '*.ogg') 
 
 
@@ -703,7 +703,7 @@ def append_result(presentation_type, stimulus, response, rt, accuracy, stimulus_
 win = visual.Window(
     size=(1024, 768),
     units='pix',
-    fullscr=False,
+    fullscr=True,
     color=(0, 0, 0),
     allowStencil=False
 )
