@@ -833,7 +833,7 @@ sample_rate = 48000  # Default sample rate for audio playback
 practice_trials = 5
 
 # Generate balanced trial list
-number_of_trials = 90 # keep this at 99 for full experiment. multiple of 9
+number_of_trials = 90 # keep this at 90 for full experiment. multiple of 9
 number_of_blocks = 3
 trials_per_block_count = number_of_trials // number_of_blocks
 
@@ -1138,6 +1138,24 @@ finally:
     practice_stream.stop()
     practice_stream.close()
 
+print("Practice trials complete.")
+practice_done = visual.TextStim(
+    win,
+    text=(
+        "Practice complete. Ask Tim if you have any questions.\n\n"
+        "If not, he will leave the room now. \n\n"
+        "remember not to move your head during trials. \n\n "
+        "The experiment will take about 15 minutes, You will get a break after about 5 and 10 minutes. \n\n "
+        "When he has left, press any key to begin the main experiment. Remember not to move your head "
+    ),
+    color='white',
+    height=32,
+    wrapWidth=1100
+)
+practice_done.draw()
+win.flip()
+event.waitKeys()
+
 # --- End practice trials ---
 
 # --- Main experimental trials ---
@@ -1264,7 +1282,7 @@ try:
                     # Check if 3 seconds has passed and image hasn't been shown yet
                     if not image_shown and elapsed_time >= 3.0:
                         image_shown = True
-                    
+                        
                     # Only check for responses AFTER image is shown (after 3 seconds)
                     if image_shown and response is None:
                         keys = event.getKeys(keyList=['up', 'down', 'escape'], timeStamped=False)
@@ -1343,7 +1361,7 @@ try:
         if block < (number_of_blocks - 1):
             break_msg = visual.TextStim(
                 win,
-                text=f"You're {block + 1}/{number_of_blocks} of the way through.\n\nTake a break.\n\nPress any key to continue.",
+                text=f"You're {block + 1}/{number_of_blocks} of the way through.\n\nTake a break. Feel free to come out of the chinrest and out of the chair if you would like\n\nPress any key to continue.",
                 color='white',
                 height=30
             )

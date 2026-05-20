@@ -1,6 +1,7 @@
 # Check Input/Output Device Index
 # Displays available audio input/output devices, allows selection, and tests recording/playback
-
+import os
+os.environ["SD_ENABLE_ASIO"] = "1" #this line is important as it allows revelation of asio devices
 import sounddevice as sd
 import soundfile as sf
 import numpy as np

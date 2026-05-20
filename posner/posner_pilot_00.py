@@ -1,18 +1,20 @@
 from psychopy import visual, event, core
 from psychopy.hardware import keyboard
+import os
+os.environ["SD_ENABLE_ASIO"] = "1" #this line is important as it allows revelation of asio devices
 import sounddevice as sd
 import soundfile as sf
 import pandas as pd
 import numpy as np
 import random
-import os
+from threading import Lock
 
 # Experiment parameters
 NUMBER_OF_TRIALS = 64  # Must be divisible by 8 (4 locations x 2 validity types)
-FIXATION_DURATION = 0.5  # 500ms
-SOUND_CUE_DURATION = 0.1  # 100ms
-CUE_TO_DOT_ISI = 0.1  # 100ms
-DOT_DURATION = 0.1  # 100ms
+FIXATION_DURATION = 0.5  # seconds
+SOUND_CUE_DURATION = 0.1  # seconds
+CUE_TO_DOT_ISI = 0.1  # seconds
+DOT_DURATION = 0.1  # seconds
 INTER_TRIAL_INTERVAL = 1.0  # seconds
 RESPONSE_TIMEOUT = 3.0  # Maximum time to wait for response in seconds
 # Set to an integer output device index (from check_input_output_index.py output list).
@@ -31,6 +33,11 @@ LOCATIONS = {
 base_dir = os.path.dirname(os.path.abspath(__file__))
 audio_dir = os.path.join(base_dir, 'audio_stimuli', 'Localised')
 soundfile = 'pink_noise_48k_30s_300_8000hz'
+results_dir = os.path.join(base_dir, 'results')
+os.makedirs(results_dir, exist_ok=True)
+
+participant_id = ""
+demographics = pd.DataFrame(columns=['participant_id'])
 
 START_KEYS = {'num_5', 'num5', 'kp_5', 'numpad5', '5', 'clear'}
 
@@ -62,6 +69,12 @@ RESPONSE_KEY_MAP = {
     '2': 'down',
 }
 
+cue_playback_state = {
+    'audio': None,
+    'pos': 0,
+    'audio_duration_samples': 0
+}
+cue_state_lock = Lock()
 
 def wait_for_start_key():
     event.clearEvents()
@@ -110,12 +123,21 @@ def get_direction_response():
 
 
 def play_cue(location_name):
-    """Play a cue briefly using sounddevice on the configured output device."""
+    """Play the first 100 ms of a cue using the persistent output stream."""
     cue_audio, cue_sr = cue_sounds[location_name]
-    sd.stop()
-    sd.play(cue_audio, samplerate=cue_sr, device=AUDIO_OUTPUT_DEVICE_INDEX)
-    core.wait(SOUND_CUE_DURATION)
-    sd.stop()
+    cue_samples = int(round(cue_sr * SOUND_CUE_DURATION))
+    cue_audio = cue_audio[:cue_samples]
+
+    with cue_state_lock:
+        cue_playback_state['audio'] = np.asarray(cue_audio, dtype=np.float32)
+        cue_playback_state['pos'] = 0
+        cue_playback_state['audio_duration_samples'] = cue_audio.shape[0]
+
+    while True:
+        with cue_state_lock:
+            if cue_playback_state['pos'] >= cue_playback_state['audio_duration_samples']:
+                break
+        core.wait(0.001)
 
 
 # Create PsychoPy window
@@ -137,6 +159,38 @@ for loc in LOCATIONS:
     cue_audio, cue_sr = sf.read(cue_path, dtype='float32')
     cue_sounds[loc] = (cue_audio, cue_sr)
 
+
+def cue_playback_callback(outdata, frame_count, time_info, status):
+    with cue_state_lock:
+        audio = cue_playback_state['audio']
+        pos = cue_playback_state['pos']
+        audio_duration = cue_playback_state['audio_duration_samples']
+
+        if audio is None or pos >= audio_duration:
+            outdata[:] = 0
+            cue_playback_state['pos'] = pos + frame_count
+            return
+
+        end_pos = pos + frame_count
+        if end_pos <= audio_duration:
+            outdata[:] = audio[pos:end_pos]
+            cue_playback_state['pos'] = end_pos
+        else:
+            first = audio[pos:audio_duration]
+            outdata[:len(first)] = first
+            outdata[len(first):] = 0
+            cue_playback_state['pos'] = audio_duration
+
+cue_stream = sd.OutputStream(
+    samplerate=48000,
+    device=AUDIO_OUTPUT_DEVICE_INDEX,
+    channels=2,
+    dtype='float32',
+    callback=cue_playback_callback,
+    latency='low',
+)
+cue_stream.start()
+
 # Create visual stimuli
 fixation = visual.ShapeStim(
     win,
@@ -145,6 +199,11 @@ fixation = visual.ShapeStim(
     lineColor='white',
     fillColor='white'
 )
+
+# Collect participant ID
+participant_id = get_text_input("Please enter your participant ID and press ENTER:")
+save_demographics()
+
 
 dot = visual.Circle(
     win,
@@ -170,7 +229,7 @@ practice_image = visual.ImageStim(
 )
 instructions = visual.TextStim(
     win,
-    text="practice complete, please press 5 to start the main experiment, you will not get feedback in the main experiment",
+    text="practice complete, remember to press the button according to where you see the circle and ignore the sound. please press 5 to start the main experiment, you will not get feedback in the main experiment",
     color='white',
     height=30,
     wrapWidth=1000
@@ -285,6 +344,10 @@ results = pd.DataFrame(columns=[
     'response_time'
 ])
 
+# Participant ID input
+participant_id = get_text_input("Enter your participant ID (e.g., P001):")
+save_demographics()
+
 # Run trials
 for trial_num in range(NUMBER_OF_TRIALS):
     # Get current trial parameters
@@ -369,13 +432,9 @@ for trial_num in range(NUMBER_OF_TRIALS):
     }
 
 # Save results
-results_dir = os.path.join(base_dir, 'results')
-if not os.path.exists(results_dir):
-    os.makedirs(results_dir)
-
-timestamp = pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')
-results_file = os.path.join(results_dir, f'posner_pilot_{timestamp}.csv')
+results_file = os.path.join(results_dir, f'{participant_id}_results.csv')
 results.to_csv(results_file, index=False)
+print(f"Results saved to {results_file}")
 
 # End screen
 end_text = visual.TextStim(
@@ -390,6 +449,8 @@ core.wait(2)
 
 # Cleanup
 sd.stop()
+cue_stream.stop()
+cue_stream.close()
 win.close()
 core.quit()
 
