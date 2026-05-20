@@ -8,7 +8,7 @@ This script:
 - Creates in_situ and ex_situ stimuli using the same single-RIR convolution workflow as
   localise_using_single_rir.py: mono mix, optional resampling, per-channel FFT convolution,
   optional RMS preservation, and peak limiting.
-- Preserves the input directory structure in each output folder.
+- Preserves the input directory structure in each output folder.C:
 
 Examples:
     python master_stim_create.py
@@ -29,6 +29,7 @@ from scipy import signal
 AUDIO_EXTENSIONS = {".wav", ".flac", ".ogg", ".aiff", ".aif", ".au", ".mp3"}
 DEFAULT_RIR_SR = 48000
 LOUDSPEAKER_TARGET_RMS = 0.1
+SPATIAL_TARGET_RMS = 0.05
 MAX_PEAK = 0.999
 
 
@@ -171,11 +172,7 @@ def process_spatial(
     preserve_rms: bool = False,
     max_amp: float = MAX_PEAK,
 ) -> np.ndarray:
-    """Mirror localise_using_single_rir.py processing.
-
-    Default behavior matches that script's default flags: no RMS preservation unless requested,
-    followed by a peak cap to avoid clipping.
-    """
+    """Mirror localise_using_single_rir.py processing, then normalize to a spatial RMS target."""
     mono = ensure_mono(audio)
     if sample_rate != rir_sr:
         mono = resample_audio(mono, sample_rate, rir_sr)
@@ -189,10 +186,7 @@ def process_spatial(
         if new_rms > 0:
             localized = localized * (orig_rms / new_rms)
 
-    peak = float(np.max(np.abs(localized))) if localized.size else 0.0
-    if peak > max_amp:
-        localized = localized * (max_amp / peak)
-
+    localized = normalize_audio(localized, SPATIAL_TARGET_RMS, max_peak=max_amp)
     return localized.astype(np.float32)
 
 
@@ -252,9 +246,9 @@ def process_folder(
 def build_default_paths(repo_root: Path) -> tuple[Path, Path, Path, Path]:
     experiment_root = repo_root / "experiment_1"
     input_root = experiment_root / "original_audios"
-    loudspeaker_root = experiment_root / "loudspeaker_stimuli_bob"
-    in_situ_root = experiment_root / "in_situ_stimuli_bob"
-    ex_situ_root = experiment_root / "ex_situ_stimuli_bob"
+    loudspeaker_root = experiment_root / "loudspeaker_stimuli_bib"
+    in_situ_root = experiment_root / "in_situ_stimuli_bib"
+    ex_situ_root = experiment_root / "ex_situ_stimuli_bib"
     return input_root, loudspeaker_root, in_situ_root, ex_situ_root
 
 

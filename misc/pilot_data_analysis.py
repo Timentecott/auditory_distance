@@ -17,7 +17,7 @@ import seaborn as sns
 
 # Setup paths
 script_dir = Path(__file__).resolve().parent
-results_folder = Path(r"C:\Users\tim_e\source\repos\auditory_distance\results\pilot_26_01")
+results_folder = Path(r"C:\Users\tim_e\source\repos\auditory_distance\experiment_1\results")
 
 # Create analysis results folder (MOVE THIS HERE)
 analysis_results_folder = script_dir / 'analysis_results'
@@ -43,6 +43,24 @@ if not csv_files:
 
 print(f"Found {len(csv_files)} participant file(s)\n")
 
+
+def normalize_presentation_type(value):
+    value = str(value).strip().lower()
+    if value == 'headphone':
+        return 'in_situ_headphone'
+    return value
+
+
+def normalize_stimulus_category(value):
+    value = str(value).strip()
+    if value.lower() == 'ists':
+        return 'ISTS'
+    return value.lower()
+
+
+presentation_levels = ['speaker', 'in_situ_headphone', 'ex_situ_headphone']
+stimulus_levels = ['environment', 'ISTS', 'noise']
+
 # Process each CSV file
 for csv_file in csv_files:
     participant_id = csv_file.stem.replace('_trials', '')  # Remove _trials suffix
@@ -54,7 +72,13 @@ for csv_file in csv_files:
         data = pd.read_csv(csv_file)
         
         # Filter to experimental trials only
-        experimental_data = data[data['trial_type'] == 'experimental']
+        experimental_data = data[data['trial_type'] == 'experimental'].copy()
+        if experimental_data.empty:
+            print(f"  WARNING: No experimental trials found for {participant_id}")
+            continue
+
+        experimental_data['presentation_type'] = experimental_data['presentation_type'].apply(normalize_presentation_type)
+        experimental_data['stimulus_category'] = experimental_data['stimulus_category'].apply(normalize_stimulus_category)
         
         # Count correct answers (overall)
         correct_answers = experimental_data['accuracy'].sum()
@@ -67,7 +91,7 @@ for csv_file in csv_files:
             correct_answers_percent = 0
             print(f"  WARNING: No experimental trials found for {participant_id}")
         
-        # Calculate mean accuracy for each of the six conditions
+        # Calculate mean accuracy for each of the nine conditions
         condition_accuracies = experimental_data.groupby(
             ['presentation_type', 'stimulus_category']
         )['accuracy'].mean()
@@ -85,8 +109,9 @@ for csv_file in csv_files:
             'correct_count': correct_answers,
             'total_trials': total_trials,
             # Add collapsed by presentation type
-            'all_headphone_percent': presentation_accuracies.get('headphone', np.nan) * 100 if 'headphone' in presentation_accuracies.index else np.nan,
             'all_speaker_percent': presentation_accuracies.get('speaker', np.nan) * 100 if 'speaker' in presentation_accuracies.index else np.nan,
+            'all_in_situ_headphone_percent': presentation_accuracies.get('in_situ_headphone', np.nan) * 100 if 'in_situ_headphone' in presentation_accuracies.index else np.nan,
+            'all_ex_situ_headphone_percent': presentation_accuracies.get('ex_situ_headphone', np.nan) * 100 if 'ex_situ_headphone' in presentation_accuracies.index else np.nan,
             # Add collapsed by stimulus type
             'all_environment_percent': stimulus_accuracies.get('environment', np.nan) * 100 if 'environment' in stimulus_accuracies.index else np.nan,
             'all_ISTS_percent': stimulus_accuracies.get('ISTS', np.nan) * 100 if 'ISTS' in stimulus_accuracies.index else np.nan,
@@ -95,12 +120,15 @@ for csv_file in csv_files:
         
         # Add condition-specific accuracies (convert to percentage)
         conditions = [
-            ('headphone', 'environment'),
-            ('headphone', 'ISTS'),
-            ('headphone', 'noise'),
             ('speaker', 'environment'),
             ('speaker', 'ISTS'),
-            ('speaker', 'noise')
+            ('speaker', 'noise'),
+            ('in_situ_headphone', 'environment'),
+            ('in_situ_headphone', 'ISTS'),
+            ('in_situ_headphone', 'noise'),
+            ('ex_situ_headphone', 'environment'),
+            ('ex_situ_headphone', 'ISTS'),
+            ('ex_situ_headphone', 'noise')
         ]
         
         for presentation, stimulus in conditions:
@@ -109,7 +137,6 @@ for csv_file in csv_files:
                 accuracy = condition_accuracies.loc[(presentation, stimulus)] * 100
                 result_row[col_name] = accuracy
             except KeyError:
-                # If condition not found (shouldn't happen with balanced design)
                 result_row[col_name] = np.nan
         
         # Add to analysis results
@@ -149,9 +176,10 @@ all_data = []
 for csv_file in csv_files:
     try:
         data = pd.read_csv(csv_file)
-        # Filter to experimental trials only (FIXED)
-        experimental_data = data[data['trial_type'] == 'experimental']
+        experimental_data = data[data['trial_type'] == 'experimental'].copy()
         experimental_data['participant_id'] = csv_file.stem.replace('_trials', '')
+        experimental_data['presentation_type'] = experimental_data['presentation_type'].apply(normalize_presentation_type)
+        experimental_data['stimulus_category'] = experimental_data['stimulus_category'].apply(normalize_stimulus_category)
         all_data.append(experimental_data)
     except Exception as e:
         print(f"Error loading {csv_file.name}: {e}")
@@ -168,7 +196,7 @@ print(f"\nTotal trials analyzed: {len(combined_data)}")
 print(f"Participants: {combined_data['participant_id'].nunique()}")
 
 # ============================================================================
-# DESCRIPTIVE STATISTICS BY CONDITION (FIXED - Participant-level SDs)
+# DESCRIPTIVE STATISTICS BY CONDITION
 # ============================================================================
 
 print("\n" + "-" * 70)
@@ -392,6 +420,67 @@ if n_ceiling > 0:
     print(f"\nCeiling participants:")
     print(ceiling_participants[['participant_id', 'correct_percent']].to_string(index=False))
     print("\nNote: Ceiling effects may reduce power to detect condition differences.")
+
+# ============================================================================
+# PLOT NINE CONDITIONS FROM SAVED CONDITION STATISTICS
+# ============================================================================
+
+print("\n" + "=" * 70)
+print("PLOTTING NINE-CONDITION ACCURACY FIGURE")
+print("=" * 70)
+
+condition_stats_path = analysis_results_folder / 'condition_statistics.csv'
+if not condition_stats_path.exists():
+    print(f"Condition statistics file not found: {condition_stats_path}")
+else:
+    plot_data = pd.read_csv(condition_stats_path)
+    plot_data['presentation_type'] = pd.Categorical(
+        plot_data['presentation_type'],
+        categories=['speaker', 'in_situ_headphone', 'ex_situ_headphone'],
+        ordered=True
+    )
+    plot_data['stimulus_category'] = pd.Categorical(
+        plot_data['stimulus_category'],
+        categories=['environment', 'ISTS', 'noise'],
+        ordered=True
+    )
+    plot_data = plot_data.sort_values(['presentation_type', 'stimulus_category'])
+
+    presentation_labels = {
+        'speaker': 'Loudspeaker',
+        'in_situ_headphone': 'In-situ headphone',
+        'ex_situ_headphone': 'Ex-situ headphone'
+    }
+    plot_data['presentation_label'] = plot_data['presentation_type'].map(presentation_labels)
+
+    plt.figure(figsize=(11, 6))
+    ax = sns.barplot(
+        data=plot_data,
+        x='stimulus_category',
+        y='mean_percent',
+        hue='presentation_label',
+        order=['environment', 'ISTS', 'noise'],
+        hue_order=['Loudspeaker', 'In-situ headphone', 'Ex-situ headphone'],
+        palette='Set2',
+        edgecolor='black'
+    )
+
+    ax.set_xlabel('Stimulus category')
+    ax.set_ylabel('Accuracy (%)')
+    ax.set_title('Accuracy by presentation type and stimulus category')
+    ax.set_ylim(0, 100)
+    ax.legend(title='Presentation', frameon=False)
+    ax.grid(axis='y', alpha=0.25)
+
+    # Add value labels on top of bars
+    for container in ax.containers:
+        ax.bar_label(container, fmt='%.1f', padding=2, fontsize=9)
+
+    plt.tight_layout()
+    plot_file = analysis_results_folder / 'accuracy_by_condition.png'
+    plt.savefig(plot_file, dpi=300, bbox_inches='tight')
+    plt.show()
+    print(f"Accuracy plot saved to: {plot_file}")
 
 
 

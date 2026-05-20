@@ -150,6 +150,38 @@ win = visual.Window(
 win.mouseVisible = False
 kb = keyboard.Keyboard()
 
+
+def get_text_input(prompt_text):
+    input_str = ""
+    prompt = visual.TextStim(win, text=prompt_text, color='white', height=30, wrapWidth=1200)
+    while True:
+        prompt.setText(f"{prompt_text}\n\n{input_str}")
+        prompt.draw()
+        win.flip()
+        for key in event.getKeys():
+            if key == 'return':
+                if input_str.strip():
+                    return input_str.strip()
+            elif key == 'backspace':
+                input_str = input_str[:-1]
+            elif key == 'escape':
+                win.close()
+                core.quit()
+            elif len(key) == 1:
+                input_str += key
+
+
+def save_demographics():
+    demographics.loc[0] = {'participant_id': participant_id}
+    demographics_file = os.path.join(results_dir, f'{participant_id}_demographics.csv')
+    demographics.to_csv(demographics_file, index=False)
+    print(f"Demographics saved to {demographics_file}")
+
+
+# Collect participant ID
+participant_id = get_text_input("Please enter your participant ID and press ENTER:")
+save_demographics()
+
 # Preload cue sounds once to reduce onset latency during trials.
 cue_sounds = {}
 for loc in LOCATIONS:
@@ -199,11 +231,6 @@ fixation = visual.ShapeStim(
     lineColor='white',
     fillColor='white'
 )
-
-# Collect participant ID
-participant_id = get_text_input("Please enter your participant ID and press ENTER:")
-save_demographics()
-
 
 dot = visual.Circle(
     win,
@@ -343,10 +370,6 @@ results = pd.DataFrame(columns=[
     'correct',
     'response_time'
 ])
-
-# Participant ID input
-participant_id = get_text_input("Enter your participant ID (e.g., P001):")
-save_demographics()
 
 # Run trials
 for trial_num in range(NUMBER_OF_TRIALS):
