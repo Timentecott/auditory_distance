@@ -296,6 +296,10 @@ def run_loudness_calibration(win, headphones_device, speakers_device, sample_rat
         with intro_lock:
             audio = intro_state['audio']
             pos = intro_state['pos']
+            if audio is None or audio.shape[0] == 0:
+                outdata[:] = 0
+                return
+
             end_pos = pos + frame_count
             if end_pos <= audio.shape[0]:
                 outdata[:] = audio[pos:end_pos]
@@ -306,7 +310,7 @@ def run_loudness_calibration(win, headphones_device, speakers_device, sample_rat
                 second = audio[:remaining]
                 outdata[:len(first)] = first
                 outdata[len(first):] = second
-                intro_state['pos'] = remaining
+                intro_state['pos'] = remaining % audio.shape[0]
 
     with sd.OutputStream(
         samplerate=sample_rate,
@@ -316,7 +320,12 @@ def run_loudness_calibration(win, headphones_device, speakers_device, sample_rat
         callback=intro_callback,
         latency='low',
     ):
-        event.waitKeys()
+        while True:
+            if event.getKeys():
+                break
+            intro_text.draw()
+            win.flip()
+            core.wait(0.01)
 
     old_mouse_visible = win.mouseVisible
     win.mouseVisible = True

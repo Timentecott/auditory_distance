@@ -17,8 +17,9 @@ CUE_TO_DOT_ISI = 0.1  # seconds
 DOT_DURATION = 0.1  # seconds
 INTER_TRIAL_INTERVAL = 1.0  # seconds
 RESPONSE_TIMEOUT = 3.0  # Maximum time to wait for response in seconds
-# Set to an integer output device index (from check_input_output_index.py output list).
-AUDIO_OUTPUT_DEVICE_INDEX = 4
+# Set to the ASIO aggregate output device index that exposes 4 output channels.
+# Channels 3-4 are used for headphone playback.
+AUDIO_OUTPUT_DEVICE_INDEX = 16
 
 # Screen coordinates for locations
 DISTANCE_FROM_CENTER = 200  # pixels
@@ -204,19 +205,22 @@ def cue_playback_callback(outdata, frame_count, time_info, status):
             return
 
         end_pos = pos + frame_count
-        if end_pos <= audio_duration:
-            outdata[:] = audio[pos:end_pos]
-            cue_playback_state['pos'] = end_pos
+        audio_frame = audio[pos:min(end_pos, audio_duration)]
+
+        if audio_frame.ndim == 1:
+            audio_frame = np.column_stack([audio_frame, audio_frame])
         else:
-            first = audio[pos:audio_duration]
-            outdata[:len(first)] = first
-            outdata[len(first):] = 0
-            cue_playback_state['pos'] = audio_duration
+            audio_frame = audio_frame[:, :2]
+
+        routed = np.zeros((frame_count, 4), dtype=np.float32)
+        routed[:len(audio_frame), 2:4] = audio_frame
+        outdata[:] = routed
+        cue_playback_state['pos'] = min(end_pos, audio_duration)
 
 cue_stream = sd.OutputStream(
     samplerate=48000,
     device=AUDIO_OUTPUT_DEVICE_INDEX,
-    channels=2,
+    channels=4,
     dtype='float32',
     callback=cue_playback_callback,
     latency='low',
