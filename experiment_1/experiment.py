@@ -234,7 +234,7 @@ def run_loudness_calibration(win, headphones_device, speakers_device, sample_rat
     if headphones_device != speakers_device:
         print(f"Warning: calibration will use device {speakers_device} for both speaker and headphone routing.")
 
-    if headphones_device != 16 or speakers_device != 16:
+    if headphones_device != 18 or speakers_device != 18:
         print("Warning: ASIO channel routing is configured for device index 16.")
 
     def _load_audio_file(audio_path):
@@ -863,7 +863,7 @@ individual_eq_file = fetch_individual_eq(participant_id)
 fixation = visual.TextStim(win, text='+', color='white', height=50)
 
 # Audio device indices (adjust these)
-ASIO_AGGREGATE_DEVICE = 16  # ASIO4ALL v2 aggregate: 4 output channels
+ASIO_AGGREGATE_DEVICE = 20  # ASIO4ALL v2 aggregate: 4 output channels
 ASIO_SPEAKER_MAPPING = [1, 2]
 ASIO_HEADPHONE_MAPPING = [3, 4]
 headphones_device = ASIO_AGGREGATE_DEVICE
@@ -872,7 +872,7 @@ sample_rate = 48000  # Default sample rate for audio playback
 
 #repeat for x trials. each new trial should be on a new row in the results table
 # Run trials in 3 blocks with breaks
-practice_trials = 5
+practice_trials = 6
 
 # Generate balanced trial list
 number_of_trials = 63 # keep this at 90 for full experiment. multiple of 9
@@ -885,44 +885,120 @@ if number_of_trials % number_of_blocks != 0:
     raise ValueError("number_of_trials must be divisible by number_of_blocks")
 
 
-def max_same_output_run(trials):
-    """Return longest consecutive run of same output code in a trial list."""
-    if not trials:
-        return 0
-    longest = 1
-    current = 1
-    previous_output = trials[0][0]
-    for output_code, _ in trials[1:]:
-        if output_code == previous_output:
-            current += 1
-            longest = max(longest, current)
-        else:
-            current = 1
-            previous_output = output_code
-    return longest
+def generate_balanced_latin_square(n_trials, n_blocks):
+    """
+    Generate trials using balanced Latin square for presentation types.
+    Ensures:
+    - Each condition appears equally at each position in block
+    - Every pair of conditions appears equally often in adjacent positions
+    - Stimulus categories never repeat consecutively across entire experiment
+    
+    Args:
+        n_trials: Total number of trials (should be divisible by 3*n_blocks)
+        n_blocks: Number of blocks
+    
+    Returns:
+        List of [presentation_type_code, stimulus_category_code] pairs
+    """
+    trials_per_block = n_trials // n_blocks
+    
+    if trials_per_block % 3 != 0:
+        raise ValueError("trials_per_block must be divisible by 3")
+    
+    # Standard balanced Latin square for 3 conditions
+    # Repeat this base pattern to fill each block
+    base_pattern = [0, 1, 2]
+    
+    all_trials = []
+    
+    for block in range(n_blocks):
+        # Rotate the base pattern for each block to vary starting position
+        rotation = block % 3
+        rotated_pattern = base_pattern[rotation:] + base_pattern[:rotation]
+        
+        # Repeat the rotated pattern to fill the block (21 trials = 7 repetitions of [0,1,2])
+        repetitions_needed = trials_per_block // 3
+        block_presentations = rotated_pattern * repetitions_needed
+        
+        # Now assign stimulus categories with constraint: no consecutive repeats
+        block_stimuli = _assign_stimulus_categories_no_consecutive(
+            block_presentations,
+            previous_stim=None if block == 0 else all_trials[-1][1]
+        )
+        
+        for presentation_code, stim_code in zip(block_presentations, block_stimuli):
+            all_trials.append([presentation_code, stim_code])
+    
+    return all_trials
 
 
-def make_balanced_trial_list(n_trials, max_run=2):
-    """Create shuffled [output, stim_type] trials with exact 1/3 output balance."""
-    trials_per_combination = n_trials // 9
-    base_trials = []
-    for output in [0, 1, 2]:
-        for stim_type in [0, 1, 2]:
-            base_trials.extend([[output, stim_type]] * trials_per_combination)
+def _assign_stimulus_categories_no_consecutive(presentation_codes, previous_stim=None, max_attempts=1000):
+    """
+    Assign stimulus categories (0, 1, 2) to presentation codes such that
+    no stimulus category repeats on consecutive trials (including across blocks).
+    
+    Args:
+        presentation_codes: List of presentation type codes for this block
+        previous_stim: Stimulus category from last trial of previous block (or None)
+        max_attempts: Maximum attempts before giving up
+    
+    Returns:
+        List of stimulus category codes with no consecutive repeats
+    """
+    n_trials = len(presentation_codes)
+    
+    for attempt in range(max_attempts):
+        # Create base list with equal distribution
+        stim_per_category = n_trials // 3
+        remainder = n_trials % 3
+        
+        stimulus_list = [0]*stim_per_category + [1]*stim_per_category + [2]*stim_per_category
+        if remainder > 0:
+            stimulus_list.extend(range(remainder))
+        
+        random.shuffle(stimulus_list)
+        
+        # Check constraint: no consecutive repeats
+        valid = True
+        
+        # Check first trial against previous block's last trial
+        if previous_stim is not None and stimulus_list[0] == previous_stim:
+            valid = False
+        
+        # Check within block
+        for i in range(len(stimulus_list) - 1):
+            if stimulus_list[i] == stimulus_list[i + 1]:
+                valid = False
+                break
+        
+        if valid:
+            return stimulus_list
+    
+    # Fallback: if we can't find a valid assignment after max_attempts,
+    # use a greedy algorithm
+    print(f"Warning: Could not find valid stimulus assignment in {max_attempts} attempts, using greedy fallback")
+    
+    stimulus_list = []
+    available_categories = [0, 1, 2]
+    forbidden = previous_stim
+    
+    for i in range(n_trials):
+        # Remove forbidden category from available
+        candidates = [c for c in available_categories if c != forbidden]
+        if not candidates:
+            candidates = available_categories
+        
+        choice = random.choice(candidates)
+        stimulus_list.append(choice)
+        forbidden = choice
+    
+    return stimulus_list
 
-    # Shuffle repeatedly until the output sequence is balanced and not overly clumped.
-    for _ in range(2000):
-        candidate = base_trials.copy()
-        random.shuffle(candidate)
-        if max_same_output_run(candidate) <= max_run:
-            return candidate
 
-    # Fallback: still balanced, just without the run-length constraint.
-    random.shuffle(base_trials)
-    return base_trials
-
-
-trial_list = make_balanced_trial_list(number_of_trials, max_run=2)
+# Generate participant-specific trial list using participant ID as seed
+# This ensures reproducibility while counterbalancing across participants
+random.seed(int(participant_id))
+trial_list = generate_balanced_latin_square(number_of_trials, number_of_blocks)
 
 # Map numeric codes to string labels
 output_map = {0: 'speaker', 1: 'in_situ_headphone', 2: 'ex_situ_headphone'}
@@ -937,13 +1013,15 @@ print(f"\nTrial configuration:")
 print(f"  Total trials: {number_of_trials}")
 print(f"  Blocks: {number_of_blocks}")
 print(f"  Trials per block: {trials_per_block_count}")
+print(f"  Actual trial_list length: {len(trial_list)}")
 print(f"  Speaker trials: {sum(1 for t in trial_list if t[0] == 0)}")
 print(f"  In-situ headphone trials: {sum(1 for t in trial_list if t[0] == 1)}")
 print(f"  Ex-situ headphone trials: {sum(1 for t in trial_list if t[0] == 2)}")
-for stim_code, stim_name in stim_type_map.items():
-    print(f"  {stim_name.capitalize()} trials: {sum(1 for t in trial_list if t[1] == stim_code)}")
+print(f"  Noise trials: {sum(1 for t in trial_list if t[1] == 0)}")
+print(f"  ISTS trials: {sum(1 for t in trial_list if t[1] == 1)}")
+print(f"  Environment trials: {sum(1 for t in trial_list if t[1] == 2)}")
 output_preview = [output_map[t[0]] for t in trial_list[:12]]
-print(f"  First 12 trial outputs (shuffled): {output_preview}")
+print(f"  First 12 trial outputs (for participant {participant_id}): {output_preview}")
 print()
 
 # --- Practice trials ---
@@ -1044,14 +1122,22 @@ practice_stream = sd.OutputStream(
 practice_stream.start()
 
 try:
+    # Create balanced practice trial list with equal numbers of each presentation type
+    practice_presentation_types = ['in_situ_headphone', 'ex_situ_headphone', 'speaker'] * (practice_trials // 3)
+    if practice_trials % 3 != 0:
+        # Add remaining trials if practice_trials is not divisible by 3
+        practice_presentation_types.extend(practice_presentation_types[:practice_trials % 3])
+    practice_presentation_types = practice_presentation_types[:practice_trials]
+    random.shuffle(practice_presentation_types)
+
     for p in range(practice_trials):
         # Show fixation cross with ISI
         fixation.draw()
         win.flip()
         core.wait(ISI)
 
-        # Randomly choose playback and stimulus category for practice
-        playback_type = random.choice(['in_situ_headphone', 'ex_situ_headphone', 'speaker'])
+        # Use balanced playback type and random stimulus category
+        playback_type = practice_presentation_types[p]
         stim_category = random.choice(stimulus_types)
 
         if playback_type == 'in_situ_headphone':
@@ -1089,7 +1175,7 @@ try:
                 audio_5s = collapse_to_left_channel(audio_5s, preserve_total_rms=True)
 
             audio_5s = ensure_stereo(audio_5s)
-            audio_5s = apply_fade(audio_5s, fs, fade_ms=20)
+            audio_5s = apply_fade(audio_5s, fs, fade_ms=50)
             audio_5s = append_silence_tail(audio_5s, fs, tail_ms=20)
             routed_audio = route_to_asio_channels(audio_5s, playback_type)
 
@@ -1109,13 +1195,17 @@ try:
             image_shown = False
             response = None
             response_message = ""
+            image_onset_time = None
 
             while True:
                 elapsed_time = time.time() - start_time
 
+                # Check if 3 seconds has passed and image hasn't been shown yet
                 if not image_shown and elapsed_time >= 3.0:
                     image_shown = True
+                    image_onset_time = time.time()
 
+                # Only check for responses AFTER image is shown (after 3 seconds)
                 if image_shown and response is None:
                     keys = event.getKeys(keyList=['up', 'down', 'escape'], timeStamped=False)
                     if keys:
@@ -1126,13 +1216,14 @@ try:
                             core.quit()
                         if 'up' in keys:
                             response = 'up'
-                            rt = elapsed_time
+                            rt = time.time() - image_onset_time
                             response_message = "response recorded - loudspeaker"
                         elif 'down' in keys:
                             response = 'down'
-                            rt = elapsed_time
+                            rt = time.time() - image_onset_time
                             response_message = "response recorded - headphone"
                 elif not image_shown:
+                    # Clear any key presses before 3 seconds (ignore them)
                     event.getKeys()
 
                 fixation.draw()
@@ -1158,20 +1249,12 @@ try:
                         core.quit()
                     if 'up' in keys:
                         response = 'up'
-                        rt = time.time() - start_time
+                        rt = time.time() - image_onset_time
                         response_message = "response recorded - loudspeaker"
                     elif 'down' in keys:
                         response = 'down'
-                        rt = time.time() - start_time
+                        rt = time.time() - image_onset_time
                         response_message = "response recorded - headphone"
-
-                fixation.draw()
-                if info_image:
-                    info_image.draw()
-                response_feedback.setText(response_message if response_message else "please respond: up=loudspeaker, down=headphone")
-                response_feedback.draw()
-                win.flip()
-                core.wait(0.01)
 
         except Exception as e:
             print(f"Error playing practice stimulus {stimulus}: {e}")
@@ -1317,6 +1400,7 @@ try:
                 image_shown = False
                 response = None
                 response_message = ""
+                image_onset_time = None
                 
                 while True:
                     elapsed_time = time.time() - start_time
@@ -1324,6 +1408,7 @@ try:
                     # Check if 3 seconds has passed and image hasn't been shown yet
                     if not image_shown and elapsed_time >= 3.0:
                         image_shown = True
+                        image_onset_time = time.time()
                         
                     # Only check for responses AFTER image is shown (after 3 seconds)
                     if image_shown and response is None:
@@ -1336,11 +1421,11 @@ try:
                                 core.quit()
                             if 'up' in keys:
                                 response = 'up'
-                                rt = elapsed_time
+                                rt = time.time() - image_onset_time
                                 response_message = "response recorded - loudspeaker"
                             elif 'down' in keys:
                                 response = 'down'
-                                rt = elapsed_time
+                                rt = time.time() - image_onset_time
                                 response_message = "response recorded - headphone"
                     elif not image_shown:
                         # Clear any key presses before 3 seconds (ignore them)
@@ -1371,11 +1456,11 @@ try:
                             core.quit()
                         if 'up' in keys:
                             response = 'up'
-                            rt = time.time() - start_time
+                            rt = time.time() - image_onset_time
                             response_message = "response recorded - loudspeaker"
                         elif 'down' in keys:
                             response = 'down'
-                            rt = time.time() - start_time
+                            rt = time.time() - image_onset_time
                             response_message = "response recorded - headphone"
 
                     fixation.draw()

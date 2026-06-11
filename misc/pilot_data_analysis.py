@@ -10,6 +10,7 @@ from scipy import stats
 import statsmodels.api as sm
 from statsmodels.formula.api import ols
 import warnings
+from datetime import datetime
 warnings.filterwarnings('ignore')
 
 import matplotlib.pyplot as plt
@@ -19,8 +20,10 @@ import seaborn as sns
 script_dir = Path(__file__).resolve().parent
 results_folder = Path(r"C:\Users\tim_e\source\repos\auditory_distance\experiment_1\results")
 
-# Create analysis results folder (MOVE THIS HERE)
-analysis_results_folder = script_dir / 'analysis_results'
+# Create dated analysis output folder under experiment_1
+analysis_root_folder = results_folder.parent / 'analysis results'
+today_folder = datetime.now().strftime('%Y-%m-%d')
+analysis_results_folder = analysis_root_folder / today_folder
 analysis_results_folder.mkdir(parents=True, exist_ok=True)
 
 # Check if results folder exists

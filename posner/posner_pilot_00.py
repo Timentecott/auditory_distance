@@ -19,23 +19,33 @@ INTER_TRIAL_INTERVAL = 1.0  # seconds
 RESPONSE_TIMEOUT = 3.0  # Maximum time to wait for response in seconds
 # Set to the ASIO aggregate output device index that exposes 4 output channels.
 # Channels 3-4 are used for headphone playback.
-AUDIO_OUTPUT_DEVICE_INDEX = 16
+AUDIO_OUTPUT_DEVICE_INDEX = 18
 
 # Screen coordinates for locations
 DISTANCE_FROM_CENTER = 200  # pixels
 LOCATIONS = {
-    'left': (-DISTANCE_FROM_CENTER, 0),
-    'right': (DISTANCE_FROM_CENTER, 0),
-    'up': (0, DISTANCE_FROM_CENTER),
-    'down': (0, -DISTANCE_FROM_CENTER)
+    'far_left': (-DISTANCE_FROM_CENTER, DISTANCE_FROM_CENTER),
+    'far_right': (DISTANCE_FROM_CENTER, DISTANCE_FROM_CENTER),
+    'near_left': (-DISTANCE_FROM_CENTER, -DISTANCE_FROM_CENTER),
+    'near_right': (DISTANCE_FROM_CENTER, -DISTANCE_FROM_CENTER)
 }
 
 # Setup paths
 base_dir = os.path.dirname(os.path.abspath(__file__))
-audio_dir = os.path.join(base_dir, 'audio_stimuli', 'Localised')
-soundfile = 'pink_noise_48k_30s_300_8000hz'
+audio_dir = os.path.join(base_dir, 'audio_stimuli')
 results_dir = os.path.join(base_dir, 'results')
 os.makedirs(results_dir, exist_ok=True)
+
+# Audio file naming prefix
+AUDIO_FILE_PREFIX = 'pink_noise_48k_30s_300_8000hz'
+
+# Map location names to audio file suffixes
+AUDIO_FILE_MAPPING = {
+    'near_left': 'near_left',
+    'near_right': 'near_right',
+    'far_left': 'far_left',
+    'far_right': 'far_right'
+}
 
 participant_id = ""
 demographics = pd.DataFrame(columns=['participant_id'])
@@ -43,31 +53,32 @@ demographics = pd.DataFrame(columns=['participant_id'])
 START_KEYS = {'num_5', 'num5', 'kp_5', 'numpad5', '5', 'clear'}
 
 # Accept both arrow keys and common numpad key names across keyboards/backends.
+# Maps: 1=near_left, 3=near_right, 7=far_left, 9=far_right
 RESPONSE_KEY_MAP = {
-    'left': 'left',
-    'right': 'right',
-    'up': 'up',
-    'down': 'down',
-    'num_4': 'left',
-    'num4': 'left',
-    'kp_4': 'left',
-    'numpad4': 'left',
-    '4': 'left',
-    'num_6': 'right',
-    'num6': 'right',
-    'kp_6': 'right',
-    'numpad6': 'right',
-    '6': 'right',
-    'num_8': 'up',
-    'num8': 'up',
-    'kp_8': 'up',
-    'numpad8': 'up',
-    '8': 'up',
-    'num_2': 'down',
-    'num2': 'down',
-    'kp_2': 'down',
-    'numpad2': 'down',
-    '2': 'down',
+    'left': 'near_left',
+    'right': 'near_right',
+    'up': 'far_left',
+    'down': 'far_right',
+    'num_1': 'near_left',
+    'num1': 'near_left',
+    'kp_1': 'near_left',
+    'numpad1': 'near_left',
+    '1': 'near_left',
+    'num_3': 'near_right',
+    'num3': 'near_right',
+    'kp_3': 'near_right',
+    'numpad3': 'near_right',
+    '3': 'near_right',
+    'num_7': 'far_left',
+    'num7': 'far_left',
+    'kp_7': 'far_left',
+    'numpad7': 'far_left',
+    '7': 'far_left',
+    'num_9': 'far_right',
+    'num9': 'far_right',
+    'kp_9': 'far_right',
+    'numpad9': 'far_right',
+    '9': 'far_right',
 }
 
 cue_playback_state = {
@@ -186,7 +197,8 @@ save_demographics()
 # Preload cue sounds once to reduce onset latency during trials.
 cue_sounds = {}
 for loc in LOCATIONS:
-    cue_path = os.path.join(audio_dir, f'{soundfile}_{loc}.wav')
+    audio_suffix = AUDIO_FILE_MAPPING[loc]
+    cue_path = os.path.join(audio_dir, f'{AUDIO_FILE_PREFIX}_{audio_suffix}.wav')
     if not os.path.exists(cue_path):
         raise FileNotFoundError(f"Missing audio cue file: {cue_path}")
     cue_audio, cue_sr = sf.read(cue_path, dtype='float32')
@@ -245,7 +257,7 @@ dot = visual.Circle(
 
 practice_instructions = visual.TextStim(
     win,
-    text="You will hear a sound, then see a dot.\nPress an arrow key on the numpad (LEFT, RIGHT, UP, DOWN) to indicate where the dot is as quickly as possible.Only use one finger for the duration of the experiment\n\nPress 5 on the numpad to have a practice.",
+    text="You will hear a sound, then see a dot.\nPress an arrow key on the numpad (4=Near Left, 6=Near Right, 8=Far Left, 2=Far Right) to indicate where the dot is as quickly as possible.\nOnly use one finger for the duration of the experiment\n\nPress 5 on the numpad to have a practice.",
     color='white',
     height=30,
     wrapWidth=1000,
@@ -266,6 +278,36 @@ instructions = visual.TextStim(
     wrapWidth=1000
 )
 
+def determine_validity_condition(sound_loc, dot_loc):
+    """
+    Determine validity condition based on audio (sound) and visual (dot) locations.
+    Categories:
+    - Valid: same location
+    - Azimuth Invalid: same distance but different side (left/right)
+    - Distance Invalid: same side but different distance (near/far)
+    - Double Invalid: different distance and different side
+    """
+    if sound_loc == dot_loc:
+        return 'Valid'
+    
+    # Extract distance and azimuth from location names
+    sound_parts = sound_loc.split('_')  # e.g., 'near_left' -> ['near', 'left']
+    dot_parts = dot_loc.split('_')      # e.g., 'far_right' -> ['far', 'right']
+    
+    sound_distance = sound_parts[0]  # 'near' or 'far'
+    sound_azimuth = sound_parts[1]   # 'left' or 'right'
+    dot_distance = dot_parts[0]
+    dot_azimuth = dot_parts[1]
+    
+    distance_match = sound_distance == dot_distance
+    azimuth_match = sound_azimuth == dot_azimuth
+    
+    if distance_match and not azimuth_match:
+        return 'Azimuth Invalid'
+    elif azimuth_match and not distance_match:
+        return 'Distance Invalid'
+    else:  # not distance_match and not azimuth_match
+        return 'Double Invalid'
 
 
 # Display practice instructions
@@ -275,34 +317,24 @@ win.flip()
 wait_for_start_key()
 
 # do 4 practice trials, including feedback for each one
-practice_location_names = ['left', 'right', 'up', 'down']
-practice_trials = [
-    {'sound_location': loc, 'is_valid': (i % 2 == 0)}
-    for i, loc in enumerate(practice_location_names)
-]
+practice_location_names = ['near_left', 'near_right', 'far_left', 'far_right']
+practice_trials = []
+
+for loc in practice_location_names:
+    # Create one valid practice trial per location
+    practice_trials.append({'sound_location': loc, 'dot_location': loc})
+
 random.shuffle(practice_trials)
 
 for practice_trial in practice_trials:
     sound_location = practice_trial['sound_location']
-    is_valid = practice_trial['is_valid']
-
-    if is_valid:
-        dot_location = sound_location
-    else:
-        if sound_location == 'left':
-            dot_location = 'right'
-        elif sound_location == 'right':
-            dot_location = 'left'
-        elif sound_location == 'up':
-            dot_location = 'down'
-        elif sound_location == 'down':
-            dot_location = 'up'
+    dot_location = practice_trial['dot_location']
+    validity_condition = determine_validity_condition(sound_location, dot_location)
 
     fixation.draw()
     win.flip()
     core.wait(FIXATION_DURATION)
 
-    sound_file = f'{soundfile}_{sound_location}.wav'
     play_cue(sound_location)
 
     win.flip()
@@ -346,54 +378,68 @@ win.flip()
 wait_for_start_key()
 
 # Create trial list
-# Ensure equal distribution across locations and validity
-location_names = ['left', 'right', 'up', 'down']
+# Ensure equal distribution across locations and validity conditions
+location_names = ['near_left', 'near_right', 'far_left', 'far_right']
 trials_per_location = NUMBER_OF_TRIALS // 4
-trials_per_validity = NUMBER_OF_TRIALS // 2
+trials_per_validity = NUMBER_OF_TRIALS // 4
 
 # Create sound locations (equal distribution)
 sound_locations = []
 for loc in location_names:
     sound_locations.extend([loc] * trials_per_location)
 
-# Create validity list (equal distribution)
-trial_validity = [True] * trials_per_validity + [False] * trials_per_validity
+# Create validity conditions (equal distribution across 4 conditions)
+# Valid, Azimuth Invalid, Distance Invalid, Double Invalid
+dot_locations_list = []
+for sound_loc in sound_locations:
+    sound_distance, sound_azimuth = sound_loc.split('_')
+    # Generate one trial of each validity condition for this sound location
+    if sound_loc == 'near_left':
+        valid_dot = 'near_left'
+        azimuth_invalid_dot = 'near_right'
+        distance_invalid_dot = 'far_left'
+        double_invalid_dot = 'far_right'
+    elif sound_loc == 'near_right':
+        valid_dot = 'near_right'
+        azimuth_invalid_dot = 'near_left'
+        distance_invalid_dot = 'far_right'
+        double_invalid_dot = 'far_left'
+    elif sound_loc == 'far_left':
+        valid_dot = 'far_left'
+        azimuth_invalid_dot = 'far_right'
+        distance_invalid_dot = 'near_left'
+        double_invalid_dot = 'near_right'
+    else:  # far_right
+        valid_dot = 'far_right'
+        azimuth_invalid_dot = 'far_left'
+        distance_invalid_dot = 'near_right'
+        double_invalid_dot = 'near_left'
+    
+    dot_locations_list.extend([valid_dot, azimuth_invalid_dot, distance_invalid_dot, double_invalid_dot])
 
-# Shuffle independently
+# Shuffle sound locations and dot locations independently
 random.shuffle(sound_locations)
-random.shuffle(trial_validity)
+random.shuffle(dot_locations_list)
 
 # Create results dataframe
 results = pd.DataFrame(columns=[
     'trial_number',
     'sound_location',
     'dot_location',
-    'is_valid',
+    'validity_condition',
     'sound_file',
     'response',
     'correct',
     'response_time'
 ])
 
+
 # Run trials
 for trial_num in range(NUMBER_OF_TRIALS):
     # Get current trial parameters
     sound_location = sound_locations[trial_num]
-    is_valid = trial_validity[trial_num]
-    
-    # Determine dot location based on validity
-    if is_valid:
-        dot_location = sound_location
-    else:
-        # Invalid trial: opposite location
-        if sound_location == 'left':
-            dot_location = 'right'
-        elif sound_location == 'right':
-            dot_location = 'left'
-        elif sound_location == 'up':
-            dot_location = 'down'
-        elif sound_location == 'down':
-            dot_location = 'up'
+    dot_location = dot_locations_list[trial_num]
+    validity_condition = determine_validity_condition(sound_location, dot_location)
     
     # Display fixation cross for 500ms
     fixation.draw()
@@ -401,7 +447,7 @@ for trial_num in range(NUMBER_OF_TRIALS):
     core.wait(FIXATION_DURATION)
     
     # Load and play sound cue (only SOUND_CUE_DURATION)
-    sound_file = f'{soundfile}_{sound_location}.wav'
+    sound_file = f'{AUDIO_FILE_PREFIX}_{AUDIO_FILE_MAPPING[sound_location]}.wav'
     play_cue(sound_location)
 
     # Cue-to-target ISI
@@ -451,7 +497,7 @@ for trial_num in range(NUMBER_OF_TRIALS):
         'trial_number': trial_num + 1,
         'sound_location': sound_location,
         'dot_location': dot_location,
-        'is_valid': is_valid,
+        'validity_condition': validity_condition,
         'sound_file': sound_file,
         'response': response,
         'correct': correct,
