@@ -227,9 +227,9 @@ def run_loudness_calibration(win, headphones_device, speakers_device, sample_rat
     """Calibrate headphone level against a fixed speaker reference using on-screen buttons."""
     from pathlib import Path
 
-    intro_speaker_file = Path(r"C:\Users\tim_e\source\repos\auditory_distance\experiment_1\loudspeaker_stimuli_bob\noise\brown_noise_5s.wav")
-    headphone_file = Path(r"C:\Users\tim_e\source\repos\auditory_distance\experiment_1\ex_situ_stimuli_bob\noise\brown_noise_5s.wav")
-    speaker_file = Path(r"C:\Users\tim_e\source\repos\auditory_distance\experiment_1\loudspeaker_stimuli_bob\noise\brown_noise_5s.wav")
+    intro_speaker_file = Path(r"C:\Users\tim_e\source\repos\auditory_distance\experiment_1\loudspeaker_stimuli_23_6\noise\brown_noise_5s.wav")
+    headphone_file = Path(r"C:\Users\tim_e\source\repos\auditory_distance\experiment_1\ex_situ_stimuli_23_6\noise\brown_noise_5s.wav")
+    speaker_file = Path(r"C:\Users\tim_e\source\repos\auditory_distance\experiment_1\loudspeaker_stimuli_23_6\noise\brown_noise_5s.wav")
 
     if headphones_device != speakers_device:
         print(f"Warning: calibration will use device {speakers_device} for both speaker and headphone routing.")
@@ -508,9 +508,9 @@ def set_experiment_audio(playback_state, state_lock, audio):
 
 #load headphone stimuli from /localised_stimuli
 base_dir = os.path.dirname(__file__) if '__file__' in globals() else os.getcwd()
-in_situ_headphone_dir = os.path.join(base_dir, 'in_situ_stimuli_bob')
-ex_situ_headphone_dir = os.path.join(base_dir, 'ex_situ_stimuli_bob')
-speaker_dir = os.path.join(base_dir, 'loudspeaker_stimuli_bob')
+in_situ_headphone_dir = os.path.join(base_dir, 'in_situ_stimuli_23_6')
+ex_situ_headphone_dir = os.path.join(base_dir, 'ex_situ_stimuli_23_6')
+speaker_dir = os.path.join(base_dir, 'loudspeaker_stimuli_23_6')
 _audio_exts = ('*.wav', '*.flac', '*.mp3', '*.aiff', '*.ogg') 
 
 
@@ -557,6 +557,7 @@ demographics = pd.DataFrame(columns=[
     'hearing_problems',     # any hearing problems/conditions
     'musician',             # plays instrument or considers self musician
     'musical_experience',   # description of musical experience (if applicable)
+    'video_gamer',          # regularly plays video games (new question)
     'timestamp'             # when demographics were collected
 ])
 
@@ -594,6 +595,7 @@ def save_demographics():
         'hearing_problems': globals().get('participant_hearing_problems', ''),
         'musician': globals().get('participant_musician', ''),
         'musical_experience': globals().get('participant_musical_experience', ''),
+        'video_gamer': globals().get('participant_video_gamer', ''),
         'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
     }
     
@@ -815,41 +817,290 @@ def get_text_input(prompt_text, allow_empty=False):
             elif len(key) == 1:  # Single character (letter, number, punctuation)
                 input_str += key
 
+# --- Multiple-choice mouse selector for demographics (UK government ethnicity categories) ---
+
+def get_mouse_choice(prompt_text, options, win, cols=2, box_width=480, box_height=36, spacing_x=20, spacing_y=12):
+    """
+    Display a list of options as clickable boxes and return the selected option string.
+    options: list of strings
+    cols: number of columns to lay out
+    """
+    mouse = event.Mouse(win=win)
+    win.mouseVisible = True
+
+    prompt = visual.TextStim(win, text=prompt_text, color='white', height=28, wrapWidth=1000, pos=(0, 260))
+
+    n = len(options)
+    rows = int(np.ceil(n / cols))
+
+    # compute layout origin to center list
+    total_width = cols * box_width + (cols - 1) * spacing_x
+    total_height = rows * box_height + (rows - 1) * spacing_y
+    start_x = -total_width / 2 + box_width / 2
+    start_y = total_height / 2 - box_height / 2
+
+    boxes = []
+    texts = []
+    for idx, opt in enumerate(options):
+        col = idx % cols
+        row = idx // cols
+        x = start_x + col * (box_width + spacing_x)
+        y = start_y - row * (box_height + spacing_y)
+        rect = visual.Rect(win, width=box_width, height=box_height, pos=(x, y), lineColor='white', fillColor=None)
+        text = visual.TextStim(win, text=opt, color='white', height=18, wrapWidth=box_width-10, pos=(x, y))
+        boxes.append(rect)
+        texts.append(text)
+
+    selected = None
+    while selected is None:
+        prompt.draw()
+        for r, t in zip(boxes, texts):
+            r.draw()
+            t.draw()
+        win.flip()
+
+        buttons = mouse.getPressed()
+        if buttons[0]:
+            mouse_pos = mouse.getPos()
+            for opt, r in zip(options, boxes):
+                try:
+                    if r.contains(mouse_pos):
+                        selected = opt
+                        break
+                except Exception:
+                    # fallback: check bounding box
+                    rx, ry = r.pos
+                    if abs(mouse_pos[0] - rx) <= (r.width / 2) and abs(mouse_pos[1] - ry) <= (r.height / 2):
+                        selected = opt
+                        break
+            core.wait(0.2)  # debounce
+
+        if event.getKeys(['escape']):
+            win.close()
+            core.quit()
+
+        core.wait(0.01)
+
+    win.mouseVisible = False
+    return selected
+
+
+# --- Grouped multiple-choice helper: non-selectable headings with selectable sub-options ---
+def get_mouse_choice_grouped(prompt_text, groups, win, cols=2, box_width=480, box_height=34, spacing_x=24, spacing_y=10, heading_height=36, top_y=300):
+    """
+    Display grouped options with non-clickable headings. 'groups' is a list of (heading, [options]) tuples.
+    Returns the selected option string.
+
+    This implementation places the prompt at the top and then renders each
+    heading followed by its option rows sequentially so headings are always
+    visible and clearly associated with their options.
+    """
+    mouse = event.Mouse(win=win)
+    win.mouseVisible = True
+
+    prompt = visual.TextStim(win, text=prompt_text, color='white', height=26, wrapWidth=1000, pos=(0, top_y))
+
+    # compute column x positions
+    total_width = cols * box_width + (cols - 1) * spacing_x
+    start_x = -total_width / 2 + box_width / 2
+    col_x = [start_x + c * (box_width + spacing_x) for c in range(cols)]
+
+    # distribute groups into columns round-robin
+    cols_groups = [[] for _ in range(cols)]
+    for i, g in enumerate(groups):
+        cols_groups[i % cols].append(g)
+
+    # Precompute drawing elements per column: list of (heading_textstim, [rects], [textstims])
+    columns_drawables = []
+    for c in range(cols):
+        x = col_x[c]
+        y = top_y - heading_height / 2 - 8 # start just below the prompt (smaller gap)
+        drawables = []
+        for heading, opts in cols_groups[c]:
+            heading_stim = visual.TextStim(win, text=heading, color='yellow', height=20, pos=(x, y), wrapWidth=box_width)
+            y -= (20 + 6)  # heading height + small gap
+            rects = []
+            texts = []
+            for opt in opts:
+                rect = visual.Rect(win, width=box_width, height=box_height, pos=(x, y - box_height/2), lineColor='white', fillColor=None)
+                text = visual.TextStim(win, text=opt, color='white', height=16, wrapWidth=box_width-10, pos=(x, y - box_height/2))
+                rects.append(rect)
+                texts.append(text)
+                y -= (box_height + spacing_y)
+            # add group spacing (smaller)
+            y -= spacing_y
+            drawables.append((heading_stim, rects, texts))
+        columns_drawables.append(drawables)
+
+    # Flatten option hit-test list
+    option_rects = []  # list of (option_string, rect)
+    for c_draw in columns_drawables:
+        for heading_stim, rects, texts in c_draw:
+            for rect, text in zip(rects, texts):
+                option_rects.append((text.text, rect))
+
+    selected = None
+    while selected is None:
+        prompt.draw()
+        # draw per column
+        for c_draw in columns_drawables:
+            for heading_stim, rects, texts in c_draw:
+                heading_stim.draw()
+                for r, t in zip(rects, texts):
+                    r.draw()
+                    t.draw()
+        win.flip()
+
+        buttons = mouse.getPressed()
+        if buttons[0]:
+            mouse_pos = mouse.getPos()
+            for opt, r in option_rects:
+                try:
+                    if r.contains(mouse_pos):
+                        selected = opt
+                        break
+                except Exception:
+                    rx, ry = r.pos
+                    if abs(mouse_pos[0] - rx) <= (r.width / 2) and abs(mouse_pos[1] - ry) <= (r.height / 2):
+                        selected = opt;
+                        break
+            core.wait(0.2)
+
+        if event.getKeys(['escape']):
+            win.close()
+            core.quit()
+
+        core.wait(0.01)
+
+    win.mouseVisible = False
+    return selected
+
+# --- End of multiple-choice helpers ---
+
 # Collect demographics
 print("\nCollecting demographics...")
 
-# Age
-participant_age = get_text_input("Please enter your age and press ENTER:")
+# Age (multiple choice age ranges)
+age_options = ['18-27', '28-37', '38-47', '48-57', '58-67', '68-77', '78-87', '88+']
+participant_age = get_mouse_choice(
+    "Please select your age range:",
+    age_options,
+    win,
+    cols=2,
+    box_width=320,
+    box_height=48,
+    spacing_x=36,
+    spacing_y=12
+)
 print(f"Age: {participant_age}")
 
-# Gender
-participant_gender = get_text_input("Please enter your gender and press ENTER:")
-print(f"Gender: {participant_gender}")
-
-# Ethnicity
-participant_ethnicity = get_text_input("Please enter your ethnicity and press ENTER:")
-print(f"Ethnicity: {participant_ethnicity}")
-
-# Hearing problems
-participant_hearing_problems = get_text_input(
-    "Do you have any hearing problems or conditions?\n(Please describe, or type 'no' if none)\n\nPress ENTER when done:"
+# Gender: clickable options (Woman, Man) or specify your own
+gender_choice = get_mouse_choice(
+    "Please select your gender (click 'I identify my gender as:' to type your own):",
+    ['Woman', 'Man', 'I identify my gender as:'],
+    win,
+    cols=1,
+    box_width=520,
+    box_height=48,
+    spacing_x=24,
+    spacing_y=12
 )
-print(f"Hearing problems: {participant_hearing_problems}")
-
-# Musician status
-participant_musician = get_text_input(
-    "Do you play a musical instrument or consider yourself a musician?\n(yes/no)\n\nPress ENTER when done:"
-)
-print(f"Musician: {participant_musician}")
-
-# Musical experience (if applicable)
-if participant_musician.lower().strip() in ['yes', 'y']:
-    participant_musical_experience = get_text_input(
-        "Please give a brief description of your musical experience:\n\nPress ENTER when done:"
+if gender_choice == 'I identify my gender as:':
+    participant_gender = get_text_input(
+        "I identify my gender as: (please specify)\n\nPress ENTER when done:",
+        allow_empty=False
     )
 else:
-    participant_musical_experience = "N/A"
+    participant_gender = gender_choice
+print(f"Gender: {participant_gender}")
+
+# Ethnicity - UK government categories (grouped headings with selectable sub-options)
+ethnicity_groups = [
+    ("Asian or Asian British", [
+        'Indian', 'Pakistani', 'Bangladeshi', 'Chinese', 'Any other Asian background'
+    ]),
+    ("Black, Black British, Caribbean or African", [
+        'Caribbean', 'African', 'Any other Black, Black British, or Caribbean background'
+    ]),
+    ("Mixed or multiple ethnic groups", [
+        'White and Black Caribbean', 'White and Black African', 'White and Asian', 'Any other Mixed or multiple ethnic background'
+    ]),
+    ("White", [
+        'English, Welsh, Scottish, Northern Irish or British', 'Irish', 'Gypsy or Irish Traveller', 'Roma', 'Any other White background'
+    ]),
+    ("Other ethnic group", [
+        'Arab', 'Any other ethnic group'
+    ])
+]
+
+participant_ethnicity = get_mouse_choice_grouped(
+    "Please select the option that best describes your ethnicity (click an option below):",
+    ethnicity_groups,
+    win,
+    cols=2,
+    box_width=520,
+    box_height=34,
+    spacing_x=24,
+    spacing_y=10
+)
+print(f"Ethnicity: {participant_ethnicity}")
+
+# Hearing problems: ask Yes/No; if Yes, collect typed description
+hearing_choice = get_mouse_choice(
+    "Do you have any hearing problems or conditions?",
+    ['Yes', 'No'],
+    win,
+    cols=2,
+    box_width=280,
+    box_height=48,
+    spacing_x=40,
+    spacing_y=10
+)
+if hearing_choice == 'Yes':
+    participant_hearing_problems = get_text_input(
+        "Please describe your hearing problems or conditions (press ENTER when done):",
+        allow_empty=False
+    )
+else:
+    participant_hearing_problems = 'No'
+print(f"Hearing problems: {participant_hearing_problems}")
+
+# Musician status: Yes/No clickable; if Yes, collect typed details
+musician_choice = get_mouse_choice(
+    "Do you play a musical instrument or consider yourself a musician?",
+    ['Yes', 'No'],
+    win,
+    cols=2,
+    box_width=280,
+    box_height=48,
+    spacing_x=40,
+    spacing_y=10
+)
+if musician_choice == 'Yes':
+    participant_musician = 'Yes'
+    participant_musical_experience = get_text_input(
+        "Please give a brief description of your musical experience (press ENTER when done):",
+        allow_empty=False
+    )
+else:
+    participant_musician = 'No'
+    participant_musical_experience = 'N/A'
+print(f"Musician: {participant_musician}")
 print(f"Musical experience: {participant_musical_experience}")
+
+# Do you regularly play video games? Yes/No
+video_game_choice = get_mouse_choice(
+    "Do you regularly play video games?",
+    ['Yes', 'No'],
+    win,
+    cols=2,
+    box_width=280,
+    box_height=48,
+    spacing_x=40,
+    spacing_y=10
+)
+participant_video_gamer = video_game_choice
+print(f"Regular video gamer: {participant_video_gamer}")
 
 # Save demographics to file
 save_demographics()
@@ -863,7 +1114,7 @@ individual_eq_file = fetch_individual_eq(participant_id)
 fixation = visual.TextStim(win, text='+', color='white', height=50)
 
 # Audio device indices (adjust these)
-ASIO_AGGREGATE_DEVICE = 20  # ASIO4ALL v2 aggregate: 4 output channels
+ASIO_AGGREGATE_DEVICE = 16  # ASIO4ALL v2 aggregate: 4 output channels
 ASIO_SPEAKER_MAPPING = [1, 2]
 ASIO_HEADPHONE_MAPPING = [3, 4]
 headphones_device = ASIO_AGGREGATE_DEVICE
@@ -1065,7 +1316,6 @@ Your task is to identify whether the sound is played through headphones or louds
 Press the UP ARROW key for loudspeakers and the DOWN ARROW key for headphones.
 
 Try to respond as quickly and accurately as possible after you see the image of headphones and loudspeakers. You can't respond until you see them
-
 Please keep your head as still as possible and look at the fixation cross throughout
 
 Press any key to begin."""
@@ -1262,24 +1512,6 @@ try:
 finally:
     practice_stream.stop()
     practice_stream.close()
-
-print("Practice trials complete.")
-practice_done = visual.TextStim(
-    win,
-    text=(
-        "Practice complete. Ask Tim if you have any questions.\n\n"
-        "If not, he will leave the room now. \n\n"
-        "remember not to move your head during trials. \n\n "
-        "The experiment will take about 15 minutes, You will get a break after about 5 and 10 minutes. \n\n "
-        "When he has left, press any key to begin the main experiment. Remember not to move your head "
-    ),
-    color='white',
-    height=32,
-    wrapWidth=1100
-)
-practice_done.draw()
-win.flip()
-event.waitKeys()
 
 # --- End practice trials ---
 

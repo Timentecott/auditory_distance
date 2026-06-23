@@ -95,6 +95,38 @@ def normalize_audio(audio: np.ndarray, target_rms: float, max_peak: float = MAX_
     return audio.astype(np.float32)
 
 
+def apply_ir_tail_fade(
+    rir: np.ndarray, rir_sr: int, fade_duration_ms: float
+) -> np.ndarray:
+    """Apply exponential fade-out to the tail of an IR to reduce echoiness.
+
+    Args:
+        rir: IR array with shape (n_samples, n_channels)
+        rir_sr: Sample rate of the IR
+        fade_duration_ms: Duration of fade-out in milliseconds
+
+    Returns:
+        Faded IR array
+    """
+    rir = np.asarray(rir, dtype=np.float32)
+    fade_samples = int(rir_sr * fade_duration_ms / 1000.0)
+
+    if fade_samples >= rir.shape[0]:
+        return rir
+
+    fade_start = rir.shape[0] - fade_samples
+    fade_curve = np.exp(np.linspace(0, -5, fade_samples))  # exponential decay from 1 to ~0.007
+
+    rir_faded = rir.copy()
+    if rir.ndim == 1:
+        rir_faded[fade_start:] *= fade_curve
+    else:
+        for ch in range(rir.shape[1]):
+            rir_faded[fade_start:, ch] *= fade_curve
+
+    return rir_faded
+
+
 def load_rir_array(rir_path: Path, rir_sr: int) -> tuple[np.ndarray, int]:
     """Load an RIR/BRIR from .npy or .sofa.
 
@@ -171,15 +203,30 @@ def process_spatial(
     rir_sr: int,
     preserve_rms: bool = False,
     max_amp: float = MAX_PEAK,
+    ir_tail_fade_duration_ms: float | None = None,
 ) -> np.ndarray:
-    """Mirror localise_using_single_rir.py processing, then normalize to a spatial RMS target."""
+    """Mirror localise_using_single_rir.py processing, then normalize to a spatial RMS target.
+
+    Args:
+        ir_tail_fade_duration_ms: Optional fade-out duration in ms to reduce IR tail echoiness.
+    """
     mono = ensure_mono(audio)
+
+    # Pre-normalize source to a consistent level before convolution
+    mono = normalize_audio(mono, 0.1, max_peak=max_amp)
+
     if sample_rate != rir_sr:
         mono = resample_audio(mono, sample_rate, rir_sr)
         sample_rate = rir_sr
 
     orig_rms = compute_rms(mono)
-    localized = convolve_with_rir(mono, rir)
+
+    # Optional: fade out the IR tail to reduce echoiness
+    rir_to_use = rir
+    if ir_tail_fade_duration_ms is not None and ir_tail_fade_duration_ms > 0:
+        rir_to_use = apply_ir_tail_fade(rir, rir_sr, ir_tail_fade_duration_ms)
+
+    localized = convolve_with_rir(mono, rir_to_use)
 
     if preserve_rms and orig_rms > 0:
         new_rms = compute_rms(localized)
@@ -203,6 +250,7 @@ def process_folder(
     overwrite: bool = False,
     preserve_rms: bool = False,
     max_amp: float = MAX_PEAK,
+    ir_tail_fade_ms: float | None = None,
 ) -> int:
     files = find_audio_files(input_root)
     if not files:
@@ -231,6 +279,7 @@ def process_folder(
                     rir_sr,
                     preserve_rms=preserve_rms,
                     max_amp=max_amp,
+                    ir_tail_fade_duration_ms=ir_tail_fade_ms,
                 )
                 output_sr = rir_sr
 
@@ -246,9 +295,9 @@ def process_folder(
 def build_default_paths(repo_root: Path) -> tuple[Path, Path, Path, Path]:
     experiment_root = repo_root / "experiment_1"
     input_root = experiment_root / "original_audios"
-    loudspeaker_root = experiment_root / "loudspeaker_stimuli_bib"
-    in_situ_root = experiment_root / "in_situ_stimuli_bib"
-    ex_situ_root = experiment_root / "ex_situ_stimuli_bib"
+    loudspeaker_root = experiment_root / "loudspeaker_stimuli_23_6"
+    in_situ_root = experiment_root / "in_situ_stimuli_23_6"
+    ex_situ_root = experiment_root / "ex_situ_stimuli_23_6"
     return input_root, loudspeaker_root, in_situ_root, ex_situ_root
 
 
@@ -292,6 +341,12 @@ def main(argv: Iterable[str] | None = None) -> int:
         help="Preserve input RMS after spatial convolution, matching localise_using_single_rir.py's optional mode.",
     )
     parser.add_argument(
+        "--ir-tail-fade-ms",
+        type=float,
+        default=None,
+        help="Optional fade-out duration in ms for IR tail to reduce echoiness (e.g., 100-200 ms).",
+    )
+    parser.add_argument(
         "--overwrite",
         action="store_true",
         help="Overwrite existing output files.",
@@ -320,6 +375,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     print(f"In-situ RIR: {in_situ_rir_path}")
     print(f"Ex-situ RIR: {ex_situ_rir_path}")
     print(f"Spatial RMS preservation: {args.preserve_rms}")
+    print(f"IR tail fade: {args.ir_tail_fade_ms} ms" if args.ir_tail_fade_ms else "IR tail fade: disabled")
     print("=" * 70)
 
     if not input_root.exists():
@@ -349,6 +405,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         rir_sr=in_situ_rir_sr,
         overwrite=args.overwrite,
         preserve_rms=args.preserve_rms,
+        ir_tail_fade_ms=args.ir_tail_fade_ms,
     )
 
     print("\nCreating ex_situ stimuli...")
@@ -359,6 +416,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         rir_sr=ex_situ_rir_sr,
         overwrite=args.overwrite,
         preserve_rms=args.preserve_rms,
+        ir_tail_fade_ms=args.ir_tail_fade_ms,
     )
 
     print("\n" + "=" * 70)
