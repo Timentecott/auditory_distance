@@ -1,0 +1,3 @@
+recorded in my bedroom with a distance of 1.5m between the speaker and listening position, 5 repetitions of the sweep, amplitude of 0.5, 2 seconds of silence at the beginning and end of the recording, and using the first input channel and the first two output channels (stereo). The command used to run the measurement was:
+no headphones```
+measure.py -dur 2 -r 5 -a 0.5 -ss 2 -es 1 -chin 1 2  -chou 2
