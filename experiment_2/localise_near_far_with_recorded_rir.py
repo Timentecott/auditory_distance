@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-Take as input a file path to a dry audio stimulus and file paths to four RIRs (either .npy or .wav).
+Take as input a file path to a dry audio stimulus and file paths to four RIRs (.npy).
 The four RIRs are: in-situ-near, in-situ-far, ex-situ-near, ex-situ-far.
 Convolve the dry stimulus with each RIR and save the resulting localized audio files to disk 
 (in a "recordings" folder). Files are saved with informative names (e.g., "stimulusname_in-situ-near.wav")
-and normalized to prevent clipping. Prints generated filenames and corresponding RIRs for verification.
+and normalized to -20 dBFS RMS. Prints generated filenames and corresponding RIRs for verification.
 """
 
+import argparse
 import os
 import numpy as np
 import scipy.signal
@@ -19,73 +20,47 @@ def compute_rms(x: np.ndarray) -> float:
     return float(np.sqrt(np.mean(np.asarray(x, dtype=np.float64) ** 2)))
 
 
-def resample_audio(audio: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
-    """Resample audio (shape (n,) or (n, ch)) to target_sr using FFT resampling.
-
-    Args:
-        audio: Audio array, 1D or 2D
-        orig_sr: Original sample rate
-        target_sr: Target sample rate
-
-    Returns:
-        Resampled audio array
-    """
-    if orig_sr == target_sr:
-        return audio
-    ratio = float(target_sr) / float(orig_sr)
-    n_samples = int(round(audio.shape[0] * ratio))
+def ensure_mono(audio: np.ndarray) -> np.ndarray:
+    """Convert audio to mono by averaging channels if stereo, or return as-is if already mono."""
     if audio.ndim == 1:
-        return scipy.signal.resample(audio, n_samples)
-    else:
-        # apply resample per channel
-        channels = []
-        for ch in range(audio.shape[1]):
-            channels.append(scipy.signal.resample(audio[:, ch], n_samples))
-        return np.column_stack(channels)
+        return audio
+    return np.mean(audio, axis=1)
+
 
 
 def load_audio(file_path):
     """
-    Load audio from either .wav or .npy file.
+    Load audio from .wav file.
 
     Args:
-        file_path (str): Path to audio file (.wav or .npy)
+        file_path (str): Path to audio file (.wav)
 
     Returns:
         tuple: (audio_data, sample_rate)
     """
     file_path = str(file_path)
 
-    if file_path.endswith('.wav'):
-        audio, sr = sf.read(file_path)
-        return audio, sr
-    elif file_path.endswith('.npy'):
-        audio = np.load(file_path)
-        sr = 44100  # Default sample rate for .npy files (can be adjusted)
-        return audio, sr
-    else:
-        raise ValueError(f"Unsupported file format: {file_path}. Use .wav or .npy")
+    audio, sr = sf.read(file_path)
+    return audio, sr
 
 
 def load_rir(rir_path):
     """
-    Load an RIR from .npy or .wav file and reshape to (n_samples, n_channels).
+    Load an RIR from .npy file and reshape to (n_samples, n_channels).
 
     Args:
-        rir_path (str): Path to RIR file (.npy or .wav)
+        rir_path (str): Path to RIR file (.npy)
 
     Returns:
         tuple: (rir_array, sample_rate) where rir_array has shape (n_samples, n_channels)
     """
     rir_path = str(rir_path)
 
-    if rir_path.endswith('.wav'):
-        rir, sr = sf.read(rir_path)
-    elif rir_path.endswith('.npy'):
-        rir = np.load(rir_path)
-        sr = 44100
-    else:
-        raise ValueError(f"Unsupported RIR format: {rir_path}. Use .wav or .npy")
+    if not rir_path.endswith('.npy'):
+        raise ValueError(f"Unsupported RIR format: {rir_path}. Use .npy")
+
+    rir = np.load(rir_path)
+    sr = 44100  # Default sample rate for RIRs
 
     rir = np.asarray(rir, dtype=np.float32)
 
@@ -120,12 +95,11 @@ def convolve_with_rir(source, rir):
     return out
 
 
-def normalize_audio(audio, target_rms_db=None, max_amp=0.999):
-    """Normalize audio to prevent clipping and target specific RMS level.
+def normalize_audio(audio, max_amp=0.999):
+    """Normalize audio to -20 dBFS RMS and prevent clipping.
 
     Args:
         audio (np.ndarray): Audio to normalize
-        target_rms_db (float): Target RMS level in dB (e.g., -12.0 for -12dB). If None, only prevents clipping.
         max_amp (float): Maximum allowed peak amplitude
 
     Returns:
@@ -133,14 +107,15 @@ def normalize_audio(audio, target_rms_db=None, max_amp=0.999):
     """
     audio = np.asarray(audio, dtype=np.float32)
 
-    # Scale to target RMS if specified
-    if target_rms_db is not None:
-        current_rms = compute_rms(audio)
-        if current_rms > 0:
-            # Convert dB to linear: linear = 10^(dB/20)
-            target_rms_linear = 10.0 ** (target_rms_db / 20.0)
-            scale = target_rms_linear / current_rms
-            audio = audio * scale
+    # Target RMS in linear scale: -20 dBFS = 10^(-20/20)
+    target_rms_dbfs = -20.0
+    target_rms_linear = 10.0 ** (target_rms_dbfs / 20.0)
+
+    # Scale to target RMS
+    current_rms = compute_rms(audio)
+    if current_rms > 0:
+        scale = target_rms_linear / current_rms
+        audio = audio * scale
 
     # Avoid clipping
     peak = float(np.max(np.abs(audio))) if audio.size > 0 else 0.0
@@ -155,7 +130,7 @@ def localise_with_recorded_rir(stimulus_path, rir_paths_dict, output_dir='record
     Convolve a dry stimulus with multiple RIRs and save localized audio files.
 
     Args:
-        stimulus_path (str): Path to dry audio stimulus file (.wav or .npy)
+        stimulus_path (str): Path to dry audio stimulus file (.wav)
         rir_paths_dict (dict): Dictionary with keys as labels and values as RIR file paths
                               Keys should be: 'in-situ-near', 'in-situ-far', 'ex-situ-near', 'ex-situ-far'
         output_dir (str): Directory to save output files (default: 'recordings')
@@ -168,9 +143,8 @@ def localise_with_recorded_rir(stimulus_path, rir_paths_dict, output_dir='record
     print(f"Loading stimulus from: {stimulus_path}")
     stimulus, stimulus_sr = load_audio(stimulus_path)
 
-    # Ensure stimulus is 1D (take first channel if stereo)
-    if stimulus.ndim > 1:
-        stimulus = stimulus[:, 0]
+    # Ensure stimulus is mono (average channels if stereo)
+    stimulus = ensure_mono(stimulus)
 
     # Get stimulus filename without extension
     stimulus_name = Path(stimulus_path).stem
@@ -199,20 +173,15 @@ def localise_with_recorded_rir(stimulus_path, rir_paths_dict, output_dir='record
         rir, rir_sr = load_rir(rir_path)
         print(f"  RIR shape: {rir.shape}")
 
-        # Resample RIR if necessary
-        if rir_sr != stimulus_sr:
-            print(f"  Resampling RIR from {rir_sr} Hz to {stimulus_sr} Hz")
-            rir = resample_audio(rir, orig_sr=rir_sr, target_sr=stimulus_sr)
-
         # Convolve with binaural RIR
         convolved = convolve_with_rir(stimulus, rir)
-
-        # Normalize to -12dB RMS and prevent clipping
-        convolved = normalize_audio(convolved, target_rms_db=-12.0, max_amp=0.999)
 
         # Generate output filename
         output_filename = f"{stimulus_name}_{label}.wav"
         output_filepath = output_path / output_filename
+
+        # Normalize to -20 dBFS RMS and prevent clipping before saving
+        convolved = normalize_audio(convolved, max_amp=0.999)
 
         # Save to disk (convolved is now multichannel)
         sf.write(str(output_filepath), convolved, stimulus_sr)
@@ -245,17 +214,55 @@ def localise_with_recorded_rir(stimulus_path, rir_paths_dict, output_dir='record
 
 
 if __name__ == "__main__":
-    # Example usage:
-    # Specify the path to your dry stimulus
-    stimulus_file = r"C:\Users\tim_e\source\repos\auditory_distance\posner\audio_stimuli\pink_noise_48k_30s_300_8000hz.wav"
+    parser = argparse.ArgumentParser(
+        description="Convolve audio stimuli with four RIRs (in-situ-near, in-situ-far, ex-situ-near, ex-situ-far) and save localized audio files."
+    )
+    parser.add_argument(
+        "--input",
+        type=Path,
+        required=True,
+        help="Path to audio file to be localized (.wav)"
+    )
+    parser.add_argument(
+        "--in-situ-near-rir",
+        type=Path,
+        required=True,
+        help="Path to in-situ-near RIR file (.npy)"
+    )
+    parser.add_argument(
+        "--in-situ-far-rir",
+        type=Path,
+        required=True,
+        help="Path to in-situ-far RIR file (.npy)"
+    )
+    parser.add_argument(
+        "--ex-situ-near-rir",
+        type=Path,
+        required=True,
+        help="Path to ex-situ-near RIR file (.npy)"
+    )
+    parser.add_argument(
+        "--ex-situ-far-rir",
+        type=Path,
+        required=True,
+        help="Path to ex-situ-far RIR file (.npy)"
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path(r"C:\Users\tim_e\source\repos\auditory_distance\experiment_2\audio_stimuli\Localised"),
+        help="Output directory for localized audio files (default: experiment_2/audio_stimuli/Localised)"
+    )
 
-    # Specify paths to your four RIRs
+    args = parser.parse_args()
+
+    # Build the RIR dictionary from command-line arguments
     rir_dict = {
-        'in-situ-near': r"C:\Users\tim_e\source\repos\auditory_distance\posner\BRIR\near_lab_22_6\RIR.npy",
-        'in-situ-far': r"C:\Users\tim_e\source\repos\auditory_distance\posner\BRIR\far_lab_22_6\RIR.npy",
-        'ex-situ-near': r"C:\Users\tim_e\source\repos\auditory_distance\posner\BRIR\near_classroom_22_6\RIR.npy",
-        'ex-situ-far': r"C:\Users\tim_e\source\repos\auditory_distance\posner\BRIR\far_classroom_22_6\RIR.npy"
+        'in-situ-near': args.in_situ_near_rir,
+        'in-situ-far': args.in_situ_far_rir,
+        'ex-situ-near': args.ex_situ_near_rir,
+        'ex-situ-far': args.ex_situ_far_rir
     }
 
     # Run the convolution and localization
-    localise_with_recorded_rir(stimulus_file, rir_dict, output_dir=r"C:\Users\tim_e\source\repos\auditory_distance\posner\audio_stimuli\Localised")
+    localise_with_recorded_rir(args.input, rir_dict, output_dir=args.output)

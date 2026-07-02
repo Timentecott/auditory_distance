@@ -8,12 +8,13 @@ import pandas as pd
 import numpy as np
 import random
 from threading import Lock
+from scipy import signal
 
 # Experiment parameters
-NUMBER_OF_TRIALS = 64  # Must be divisible by 8 (2 presentation types x 2 validity types x 2 locations)
+NUMBER_OF_TRIALS = 12  # Must be divisible by 3 (3 presentation types: loudspeaker, ex_situ, in_situ) and by 2 for valid/invalid balance
 FIXATION_DURATION = 0.5  # seconds
-SOUND_CUE_DURATION = 0.1  # seconds
-CUE_TO_DOT_ISI = 0.2  # seconds includes 100ms cue duration
+SOUND_CUE_DURATION = 0.200  # seconds
+CUE_TO_DOT_ISI = 0.3  # seconds includes 100ms cue duration
 DOT_DURATION = 0.5  # seconds
 INTER_TRIAL_INTERVAL = 1.5  # seconds
 RESPONSE_TIMEOUT = 3.0  # Maximum time to wait for response in seconds
@@ -22,7 +23,7 @@ RESPONSE_TIMEOUT = 3.0  # Maximum time to wait for response in seconds
 AUDIO_OUTPUT_DEVICE_INDEX = 12
 
 # Presentation types (in situ vs ex situ)
-PRESENTATION_TYPES = ['in_situ', 'ex_situ']
+PRESENTATION_TYPES = ['loudspeaker', 'in_situ', 'ex_situ']
 
 # Screen coordinates for locations
 DISTANCE_FROM_CENTER = 200  # pixels
@@ -33,12 +34,13 @@ LOCATIONS = {
 
 # Setup paths
 base_dir = os.path.dirname(os.path.abspath(__file__))
-audio_dir = os.path.join(base_dir, 'audio_stimuli\localised')
+audio_stimuli_dir = os.path.join(base_dir, 'audio_stimuli')
+audio_dir = os.path.join(audio_stimuli_dir, 'Localised')
 results_dir = os.path.join(base_dir, 'results')
 os.makedirs(results_dir, exist_ok=True)
 
 # Audio file naming prefix
-AUDIO_FILE_PREFIX = 'pink_noise_48k_30s_300_8000hz'
+AUDIO_FILE_PREFIX = 'short_tap'
 
 # Helper: find an existing file suffix for a location, prefer left variants
 def _find_existing_suffix(location_key):
@@ -53,18 +55,27 @@ def _find_existing_suffix(location_key):
 # Map logical (presentation_type, location) pairs to actual audio file suffixes (use left variants only)
 # Format: (presentation_type, location) -> suffix
 AUDIO_FILE_MAPPING = {
-    ('in_situ', 'near'): 'in-situ-near',## add more to the suffix once the proper files are created.
+    ('in_situ', 'near'): 'in-situ-near',
     ('in_situ', 'far'): 'in-situ-far',
     ('ex_situ', 'near'): 'ex-situ-near',
     ('ex_situ', 'far'): 'ex-situ-far',
+    ('loudspeaker', 'near'): 'loudspeaker',  # Uses short_tap.wav via special handling
+    ('loudspeaker', 'far'): 'loudspeaker',   # Uses short_tap.wav via special handling
 }
 
-# Verify files exist
+# Verify files exist (skip loudspeaker as it uses special file)
 missing = []
 for (presentation, location), suffix in AUDIO_FILE_MAPPING.items():
+    if presentation == 'loudspeaker':
+        continue  # Loudspeaker handled separately
     p = os.path.join(audio_dir, f"{AUDIO_FILE_PREFIX}_{suffix}.wav")
     if not os.path.exists(p):
         missing.append(p)
+
+# Verify short_tap.wav exists for loudspeaker
+short_tap_path = os.path.join(audio_stimuli_dir, "short_tap.wav")
+if not os.path.exists(short_tap_path):
+    missing.append(short_tap_path)
 
 if missing:
     raise FileNotFoundError(
@@ -95,7 +106,9 @@ RESPONSE_KEY_MAP = {
 cue_playback_state = {
     'audio': None,
     'pos': 0,
-    'audio_duration_samples': 0
+    'audio_duration_samples': 0,
+    'presentation_type': 'in_situ',
+    'sound_location': 'near'
 }
 cue_state_lock = Lock()
 
@@ -152,18 +165,37 @@ def play_cue(presentation_type, location_name):
         presentation_type: 'in_situ' or 'ex_situ'
         location_name: 'near' or 'far'
     """
+    print(f"[AUDIO] Playing cue: {presentation_type} {location_name}")
+
     cue_audio, cue_sr = cue_sounds[(presentation_type, location_name)]
     cue_samples = int(round(cue_sr * SOUND_CUE_DURATION))
     cue_audio = cue_audio[:cue_samples]
+    print(f"[AUDIO] Cue samples: {cue_samples}, audio shape after cut: {cue_audio.shape}")
+
+    # If sample rate doesn't match stream sample rate, resample
+    if cue_sr != 44100:
+        ratio = 44100 / cue_sr
+        n_samples = int(round(cue_audio.shape[0] * ratio))
+        if cue_audio.ndim == 1:
+            cue_audio = signal.resample(cue_audio, n_samples)
+        else:
+            resampled = []
+            for ch in range(cue_audio.shape[1]):
+                resampled.append(signal.resample(cue_audio[:, ch], n_samples))
+            cue_audio = np.column_stack(resampled)
 
     with cue_state_lock:
         cue_playback_state['audio'] = np.asarray(cue_audio, dtype=np.float32)
         cue_playback_state['pos'] = 0
         cue_playback_state['audio_duration_samples'] = cue_audio.shape[0]
+        cue_playback_state['presentation_type'] = presentation_type
+        cue_playback_state['sound_location'] = location_name
+        print(f"[AUDIO] Set playback state: duration={cue_audio.shape[0]}, audio_min={np.min(cue_audio)}, audio_max={np.max(cue_audio)}")
 
     while True:
         with cue_state_lock:
             if cue_playback_state['pos'] >= cue_playback_state['audio_duration_samples']:
+                print(f"[AUDIO] Playback complete")
                 break
         core.wait(0.001)
 
@@ -212,21 +244,38 @@ save_demographics()
 
 # Preload cue sounds once to reduce onset latency during trials.
 cue_sounds = {}
+short_tap_audio = None
+short_tap_sr = None
+
 for presentation in PRESENTATION_TYPES:
     for loc in LOCATIONS:
-        audio_suffix = AUDIO_FILE_MAPPING[(presentation, loc)]
-        cue_path = os.path.join(audio_dir, f'{AUDIO_FILE_PREFIX}_{audio_suffix}.wav')
-        if not os.path.exists(cue_path):
-            raise FileNotFoundError(f"Missing audio cue file: {cue_path}")
-        cue_audio, cue_sr = sf.read(cue_path, dtype='float32')
-        cue_sounds[(presentation, loc)] = (cue_audio, cue_sr)
+        if presentation == 'loudspeaker':
+            # Load short_tap.wav once for all loudspeaker trials
+            if short_tap_audio is None:
+                short_tap_path = os.path.join(audio_stimuli_dir, 'short_tap.wav')
+                short_tap_audio, short_tap_sr = sf.read(short_tap_path, dtype='float32')
+                print(f"Loaded {short_tap_path}: shape={short_tap_audio.shape}, sr={short_tap_sr}Hz")
+            cue_sounds[(presentation, loc)] = (short_tap_audio, short_tap_sr)
+        else:
+            audio_suffix = AUDIO_FILE_MAPPING[(presentation, loc)]
+            cue_path = os.path.join(audio_dir, f'{AUDIO_FILE_PREFIX}_{audio_suffix}.wav')
+            if not os.path.exists(cue_path):
+                raise FileNotFoundError(f"Missing audio cue file: {cue_path}")
+            cue_audio, cue_sr = sf.read(cue_path, dtype='float32')
+            print(f"Loaded {cue_path}: shape={cue_audio.shape}, sr={cue_sr}Hz")
+            cue_sounds[(presentation, loc)] = (cue_audio, cue_sr)
 
 
 def cue_playback_callback(outdata, frame_count, time_info, status):
+    if status:
+        print(f"Audio callback status: {status}")
+
     with cue_state_lock:
         audio = cue_playback_state['audio']
         pos = cue_playback_state['pos']
         audio_duration = cue_playback_state['audio_duration_samples']
+        presentation_type = cue_playback_state.get('presentation_type', 'in_situ')
+        sound_location = cue_playback_state.get('sound_location', 'near')
 
         if audio is None or pos >= audio_duration:
             outdata[:] = 0
@@ -242,7 +291,16 @@ def cue_playback_callback(outdata, frame_count, time_info, status):
             audio_frame = audio_frame[:, :2]
 
         routed = np.zeros((frame_count, 4), dtype=np.float32)
-        routed[:len(audio_frame), 0:2] = audio_frame
+
+        # Route to appropriate channels based on presentation type
+        if presentation_type == 'loudspeaker':
+            # Loudspeaker: channel 1 for near, channel 2 for far
+            channel_idx = 0 if sound_location == 'near' else 1
+            routed[:len(audio_frame), channel_idx:channel_idx+1] = audio_frame[:, 0:1]
+        else:
+            # In-situ and ex-situ: channels 3-4
+            routed[:len(audio_frame), 2:4] = audio_frame
+
         outdata[:] = routed
         cue_playback_state['pos'] = min(end_pos, audio_duration)
 
@@ -255,6 +313,7 @@ cue_stream = sd.OutputStream(
     latency='low',
 )
 cue_stream.start()
+print(f"[STREAM] Audio stream started on device {AUDIO_OUTPUT_DEVICE_INDEX}, stream active: {cue_stream.active}")
 
 # Create visual stimuli
 fixation = visual.ShapeStim(
@@ -378,25 +437,27 @@ def project_point_to_floor(elements, depth_t):
 
 
 def draw_dot_in_room(elements, distance_label, color='white'):
-    """Draw a dot that convincingly sits on the room floor. distance_label in ('near','far')."""
-    # Map labels to normalized depth values
-    depth_map = {
-        'near': 0.18,
-        'far': 0.82
-    }
-    t = depth_map.get(distance_label, 0.5)
-    x, y, r, sw, sh = project_point_to_floor(elements, t)
+    """Draw a dot that is equidistant from the fixation cross.
+    Both 'near' and 'far' dots are the same size and distance from fixation.
+    They are positioned above (far) and below (near) the fixation point."""
+    # Use far depth for size (consistent for both dots)
+    fixed_depth_for_size = 0.82
+    _, _, r_fixed, _, _ = project_point_to_floor(elements, fixed_depth_for_size)
+    r = r_fixed
 
-    # Shadow ellipse drawn on the floor beneath the dot
-    n_ellipse = 32
-    verts = []
-    for i in range(n_ellipse):
-        theta = 2.0 * np.pi * i / n_ellipse
-        vx = (sw / 2.0) * np.cos(theta)
-        vy = (sh / 2.0) * np.sin(theta)
-        verts.append((x + vx, y - (r * 0.35) + vy))
-    shadow_shape = visual.ShapeStim(win, vertices=verts, closeShape=True, fillColor=(0.06,0.06,0.06), lineColor=None)
-    shadow_shape.draw()
+    # Get fixation cross position (center of screen)
+    fix_x, fix_y = fixation.pos
+
+    # Calculate a reasonable distance offset from the fixation cross
+    # Use the radius as a baseline - the dot should be about 10-11 radii away
+    distance_from_fixation = r * 10.5
+
+    # Position dots equidistant from fixation on vertical axis
+    x = fix_x  # Both dots stay horizontally centered
+    if distance_label == 'far':
+        y = fix_y + distance_from_fixation  # Below fixation (far)
+    else:  # 'near'
+        y = fix_y - distance_from_fixation  # Above fixation (near)
 
     # Draw a slightly larger darker ring to give depth, then bright core
     ring = visual.Circle(win, radius=r * 1.1, edges=64, fillColor=(0.08,0.08,0.08), lineColor=None, pos=(x, y))
@@ -535,6 +596,7 @@ for practice_trial in practice_trials:
 
     # Keep the room visible during the cue-to-dot interval
     draw_perspective_room(perspective_elements)
+    fixation.draw()
     win.flip()
     core.wait(CUE_TO_DOT_ISI)
 
@@ -549,6 +611,7 @@ for practice_trial in practice_trials:
     while core.getTime() - dot_display_start < DOT_DURATION:
         draw_perspective_room(perspective_elements)
         draw_dot_in_room(perspective_elements, dot_location)
+        fixation.draw()
         win.flip()
 
         # Check for response during dot display
@@ -557,8 +620,9 @@ for practice_trial in practice_trials:
 
         core.wait(0.01)  # Small wait to prevent excessive CPU usage
 
-    # After the dot disappears, show the room alone while waiting for response
+    # After the dot disappears, show the room with fixation while waiting for response
     draw_perspective_room(perspective_elements)
+    fixation.draw()
     win.flip()
 
     # Wait for response if none was made during dot display
@@ -576,14 +640,16 @@ for practice_trial in practice_trials:
         color='green' if correct else 'red',
         height=40
     )
-    # Draw feedback over room
+    # Draw feedback over room with fixation
     draw_perspective_room(perspective_elements)
+    fixation.draw()
     feedback.draw()
     win.flip()
     core.wait(0.5)
 
-    # Show room during inter-trial interval
+    # Show room and fixation during inter-trial interval
     draw_perspective_room(perspective_elements)
+    fixation.draw()
     win.flip()
     core.wait(INTER_TRIAL_INTERVAL)
 
@@ -597,6 +663,62 @@ wait_for_start_key()
 participant_seed = int(participant_id) if participant_id.isdigit() else hash(participant_id) % (2**31)
 random.seed(participant_seed)
 np.random.seed(participant_seed)
+
+def generate_blocked_trial_list(n_trials):
+    """
+    Generate a blocked trial list with loudspeaker block first, then ex-situ, then in-situ.
+
+    Conditions within each block (2 total):
+    - valid (sound and dot at same location)
+    - invalid (sound and dot at different locations)
+
+    Each third of trials is one presentation type.
+    Within each block, trials are balanced and randomized.
+
+    Args:
+        n_trials: Total number of trials (must be divisible by 3)
+
+    Returns:
+        List of trial dicts with keys: presentation_type, sound_location, dot_location
+    """
+    if n_trials % 3 != 0:
+        raise ValueError("n_trials must be divisible by 3 for three equal blocks")
+
+    trials_per_block = n_trials // 3
+    if trials_per_block % 2 != 0:
+        raise ValueError("Each block must be divisible by 2 for valid/invalid balance")
+
+    # Block 1: loudspeaker, Block 2: ex-situ, Block 3: in-situ
+    presentation_order = ['loudspeaker', 'ex_situ', 'in_situ']
+
+    trial_list = []
+
+    for presentation_type in presentation_order:
+        trials_per_validity = trials_per_block // 2
+
+        # Create conditions: valid and invalid
+        conditions = ['valid'] * trials_per_validity + ['invalid'] * trials_per_validity
+
+        # Shuffle within block
+        random.shuffle(conditions)
+
+        for validity in conditions:
+            # Randomly choose which location pair for sound/dot
+            if random.choice([True, False]):
+                sound_location = 'near'
+                dot_location = 'near' if validity == 'valid' else 'far'
+            else:
+                sound_location = 'far'
+                dot_location = 'far' if validity == 'valid' else 'near'
+
+            trial_list.append({
+                'presentation_type': presentation_type,
+                'sound_location': sound_location,
+                'dot_location': dot_location
+            })
+
+    return trial_list
+
 
 def generate_balanced_trial_list(n_trials):
     """
@@ -679,7 +801,7 @@ def generate_balanced_trial_list(n_trials):
 
     return trial_list
 
-trials = generate_balanced_trial_list(NUMBER_OF_TRIALS)
+trials = generate_blocked_trial_list(NUMBER_OF_TRIALS)
 
 # Create results dataframe
 results = pd.DataFrame(columns=[
@@ -715,8 +837,9 @@ for trial_num in range(NUMBER_OF_TRIALS):
     sound_file = f'{AUDIO_FILE_PREFIX}_{audio_suffix}.wav'
     play_cue(presentation_type, sound_location)
 
-    # Cue-to-target ISI - keep room visible
+    # Cue-to-target ISI - keep room and fixation visible
     draw_perspective_room(perspective_elements)
+    fixation.draw()
     win.flip()
     core.wait(CUE_TO_DOT_ISI)
 
@@ -733,6 +856,7 @@ for trial_num in range(NUMBER_OF_TRIALS):
     while core.getTime() - dot_display_start < DOT_DURATION:
         draw_perspective_room(perspective_elements)
         draw_dot_in_room(perspective_elements, dot_location)
+        fixation.draw()
         win.flip()
 
         # Check for response during dot display
@@ -743,8 +867,9 @@ for trial_num in range(NUMBER_OF_TRIALS):
 
         core.wait(0.01)  # Small wait to prevent excessive CPU usage
 
-    # After dot disappears, show room alone and wait for response if none was given
+    # After dot disappears, show room and fixation, wait for response if none was given
     draw_perspective_room(perspective_elements)
+    fixation.draw()
     win.flip()
 
     # Wait for arrow key response if none was made during dot display
@@ -762,8 +887,9 @@ for trial_num in range(NUMBER_OF_TRIALS):
     # No on-screen feedback; keep timing equivalent to previous feedback period but keep room visible
     core.wait(0.5)
 
-    # Show room during inter-trial interval
+    # Show room and fixation during inter-trial interval
     draw_perspective_room(perspective_elements)
+    fixation.draw()
     win.flip()
     core.wait(INTER_TRIAL_INTERVAL)
 
