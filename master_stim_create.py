@@ -27,10 +27,18 @@ import soundfile as sf
 from scipy import signal
 
 AUDIO_EXTENSIONS = {".wav", ".flac", ".ogg", ".aiff", ".aif", ".au", ".mp3"}
-DEFAULT_RIR_SR = 48000
-LOUDSPEAKER_TARGET_RMS = 0.1
-SPATIAL_TARGET_RMS = 0.05
+OUTPUT_SAMPLE_RATE = 44100
+DEFAULT_RIR_SR = 44100
+LOUDSPEAKER_TARGET_RMS_DBFS = -20.0
+SPATIAL_TARGET_RMS_DBFS = -20.0
+LOUDSPEAKER_TARGET_RMS = 10.0 ** (LOUDSPEAKER_TARGET_RMS_DBFS / 20.0)
+SPATIAL_TARGET_RMS = 10.0 ** (SPATIAL_TARGET_RMS_DBFS / 20.0)
 MAX_PEAK = 0.999
+BANDPASS_LOW_HZ = 800.0
+BANDPASS_HIGH_HZ = 18000.0
+BANDPASS_ORDER = 4
+SILENCE_PAD_SECONDS = 0.1
+CLICK_RAMP_SECONDS = 0.05
 
 
 def find_audio_files(path: Path) -> list[Path]:
@@ -183,6 +191,81 @@ def convolve_with_rir(source_mono: np.ndarray, rir: np.ndarray) -> np.ndarray:
     return output
 
 
+def apply_bandpass_filter(audio: np.ndarray, sample_rate: int) -> np.ndarray:
+    audio = np.asarray(audio, dtype=np.float32)
+    nyquist = sample_rate / 2.0
+    if BANDPASS_LOW_HZ <= 0 or BANDPASS_HIGH_HZ >= nyquist:
+        raise ValueError(
+            f"Bandpass cutoff frequencies must satisfy 0 < {BANDPASS_LOW_HZ} < {BANDPASS_HIGH_HZ} < Nyquist ({nyquist} Hz)"
+        )
+
+    sos = signal.butter(
+        BANDPASS_ORDER,
+        [BANDPASS_LOW_HZ, BANDPASS_HIGH_HZ],
+        btype="bandpass",
+        fs=sample_rate,
+        output="sos",
+    )
+
+    if audio.ndim == 1:
+        try:
+            return signal.sosfiltfilt(sos, audio).astype(np.float32)
+        except ValueError:
+            return signal.sosfilt(sos, audio).astype(np.float32)
+
+    filtered_channels = []
+    for ch in range(audio.shape[1]):
+        channel = audio[:, ch]
+        try:
+            filtered = signal.sosfiltfilt(sos, channel)
+        except ValueError:
+            filtered = signal.sosfilt(sos, channel)
+        filtered_channels.append(filtered.astype(np.float32))
+    return np.column_stack(filtered_channels)
+
+
+def apply_linear_ramps(audio: np.ndarray, sample_rate: int, ramp_seconds: float) -> np.ndarray:
+    audio = np.asarray(audio, dtype=np.float32)
+    ramp_samples = int(round(sample_rate * ramp_seconds))
+    if ramp_samples <= 0 or audio.shape[0] == 0:
+        return audio
+
+    ramp_samples = min(ramp_samples, audio.shape[0] // 2)
+    if ramp_samples <= 0:
+        return audio
+
+    ramp = np.linspace(0.0, 1.0, ramp_samples, endpoint=True, dtype=np.float32)
+    shaped = audio.copy()
+
+    if shaped.ndim == 1:
+        shaped[:ramp_samples] *= ramp
+        shaped[-ramp_samples:] *= ramp[::-1]
+    else:
+        shaped[:ramp_samples, :] *= ramp[:, None]
+        shaped[-ramp_samples:, :] *= ramp[::-1][:, None]
+    return shaped
+
+
+def add_silence_padding(audio: np.ndarray, sample_rate: int, pad_seconds: float) -> np.ndarray:
+    audio = np.asarray(audio, dtype=np.float32)
+    pad_samples = int(round(sample_rate * pad_seconds))
+    if pad_samples <= 0:
+        return audio
+
+    if audio.ndim == 1:
+        padding = np.zeros(pad_samples, dtype=np.float32)
+        return np.concatenate([padding, audio, padding])
+
+    padding = np.zeros((pad_samples, audio.shape[1]), dtype=np.float32)
+    return np.vstack([padding, audio, padding])
+
+
+def apply_final_stimulus_processing(audio: np.ndarray, sample_rate: int) -> np.ndarray:
+    filtered = apply_bandpass_filter(audio, sample_rate)
+    ramped = apply_linear_ramps(filtered, sample_rate, CLICK_RAMP_SECONDS)
+    return add_silence_padding(ramped, sample_rate, SILENCE_PAD_SECONDS)
+
+
 def make_output_path(input_file: Path, input_root: Path, output_root: Path) -> Path:
     relative = input_file.relative_to(input_root)
     out_path = output_root / relative
@@ -193,7 +276,8 @@ def make_output_path(input_file: Path, input_root: Path, output_root: Path) -> P
 def process_loudspeaker(audio: np.ndarray, sample_rate: int) -> np.ndarray:
     mono = ensure_mono(audio)
     stereo = mono_left_only_stereo(mono)
-    return normalize_audio(stereo, LOUDSPEAKER_TARGET_RMS)
+    stereo = normalize_audio(stereo, LOUDSPEAKER_TARGET_RMS)
+    return resample_audio(stereo, sample_rate, OUTPUT_SAMPLE_RATE).astype(np.float32)
 
 
 def process_spatial(
@@ -205,15 +289,8 @@ def process_spatial(
     max_amp: float = MAX_PEAK,
     ir_tail_fade_duration_ms: float | None = None,
 ) -> np.ndarray:
-    """Mirror localise_using_single_rir.py processing, then normalize to a spatial RMS target.
-
-    Args:
-        ir_tail_fade_duration_ms: Optional fade-out duration in ms to reduce IR tail echoiness.
-    """
+    """Mirror localise_using_single_rir.py processing, then normalize to a spatial RMS target."""
     mono = ensure_mono(audio)
-
-    # Pre-normalize source to a consistent level before convolution
-    mono = normalize_audio(mono, 0.1, max_peak=max_amp)
 
     if sample_rate != rir_sr:
         mono = resample_audio(mono, sample_rate, rir_sr)
@@ -221,7 +298,6 @@ def process_spatial(
 
     orig_rms = compute_rms(mono)
 
-    # Optional: fade out the IR tail to reduce echoiness
     rir_to_use = rir
     if ir_tail_fade_duration_ms is not None and ir_tail_fade_duration_ms > 0:
         rir_to_use = apply_ir_tail_fade(rir, rir_sr, ir_tail_fade_duration_ms)
@@ -234,11 +310,12 @@ def process_spatial(
             localized = localized * (orig_rms / new_rms)
 
     localized = normalize_audio(localized, SPATIAL_TARGET_RMS, max_peak=max_amp)
-    return localized.astype(np.float32)
+    return resample_audio(localized, rir_sr, OUTPUT_SAMPLE_RATE).astype(np.float32)
 
 
 def save_audio(path: Path, audio: np.ndarray, sample_rate: int) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    audio = apply_final_stimulus_processing(audio, sample_rate)
     sf.write(str(path), audio, sample_rate)
 
 
@@ -270,7 +347,6 @@ def process_folder(
             audio, sample_rate = load_audio(audio_path)
             if rir is None:
                 processed_audio = process_loudspeaker(audio, sample_rate)
-                output_sr = sample_rate
             else:
                 processed_audio = process_spatial(
                     audio,
@@ -281,9 +357,8 @@ def process_folder(
                     max_amp=max_amp,
                     ir_tail_fade_duration_ms=ir_tail_fade_ms,
                 )
-                output_sr = rir_sr
 
-            save_audio(out_path, processed_audio, output_sr)
+            save_audio(out_path, processed_audio, OUTPUT_SAMPLE_RATE)
             processed += 1
             print(f"[{idx}/{len(files)}] {audio_path} -> {out_path}")
         except Exception as exc:
@@ -295,10 +370,23 @@ def process_folder(
 def build_default_paths(repo_root: Path) -> tuple[Path, Path, Path, Path]:
     experiment_root = repo_root / "experiment_1"
     input_root = experiment_root / "original_audios"
-    loudspeaker_root = experiment_root / "loudspeaker_stimuli_23_6"
-    in_situ_root = experiment_root / "in_situ_stimuli_23_6"
-    ex_situ_root = experiment_root / "ex_situ_stimuli_23_6"
+    loudspeaker_root = experiment_root / "loudspeaker_2"
+    in_situ_root = experiment_root / "in_situ_2"
+    ex_situ_root = experiment_root / "ex_situ_2"
     return input_root, loudspeaker_root, in_situ_root, ex_situ_root
+
+
+def confirm_overwrite_existing_outputs(output_roots: list[Path]) -> bool:
+    existing_roots = [path for path in output_roots if path.exists()]
+    if not existing_roots:
+        return True
+
+    print("\nThe following output folders already exist:")
+    for path in existing_roots:
+        print(f"  - {path}")
+
+    answer = input("Overwrite existing output files in these folders? [y/N]: ").strip().lower()
+    return answer in {"y", "yes"}
 
 
 def main(argv: Iterable[str] | None = None) -> int:
@@ -358,9 +446,9 @@ def main(argv: Iterable[str] | None = None) -> int:
 
     input_root = args.input or default_input_root
     output_base = args.output_base or (repo_root / "experiment_1")
-    loudspeaker_root = default_loudspeaker_root if args.output_base is None else output_base / "loudspeaker_stimuli_bob"
-    in_situ_root = default_in_situ_root if args.output_base is None else output_base / "in_situ_stimuli_bob"
-    ex_situ_root = default_ex_situ_root if args.output_base is None else output_base / "ex_situ_stimuli_bob"
+    loudspeaker_root = default_loudspeaker_root if args.output_base is None else output_base / "loudspeaker_stimuli_2906"
+    in_situ_root = default_in_situ_root if args.output_base is None else output_base / "in_situ_stimuli_2906"
+    ex_situ_root = default_ex_situ_root if args.output_base is None else output_base / "ex_situ_stimuli_2906"
 
     in_situ_rir_path = args.in_situ_rir or (repo_root / "experiment_1" / "resources" / "tim_lab_headphoneRIR.npy")
     ex_situ_rir_path = args.ex_situ_rir or (repo_root / "experiment_1" / "resources" / "tim_otherlabRIR.npy")
@@ -376,11 +464,19 @@ def main(argv: Iterable[str] | None = None) -> int:
     print(f"Ex-situ RIR: {ex_situ_rir_path}")
     print(f"Spatial RMS preservation: {args.preserve_rms}")
     print(f"IR tail fade: {args.ir_tail_fade_ms} ms" if args.ir_tail_fade_ms else "IR tail fade: disabled")
+    print(f"Output sample rate: {OUTPUT_SAMPLE_RATE} Hz")
     print("=" * 70)
 
     if not input_root.exists():
         print(f"Input folder not found: {input_root}")
         return 2
+
+    output_roots = [loudspeaker_root, in_situ_root, ex_situ_root]
+    if not confirm_overwrite_existing_outputs(output_roots):
+        print("Cancelled.")
+        return 1
+
+    overwrite_outputs = True if args.overwrite or any(path.exists() for path in output_roots) else args.overwrite
 
     loudspeaker_root.mkdir(parents=True, exist_ok=True)
     in_situ_root.mkdir(parents=True, exist_ok=True)
@@ -394,7 +490,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         input_root=input_root,
         output_root=loudspeaker_root,
         rir=None,
-        overwrite=args.overwrite,
+        overwrite=overwrite_outputs,
     )
 
     print("\nCreating in_situ stimuli...")
@@ -403,7 +499,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         output_root=in_situ_root,
         rir=in_situ_rir,
         rir_sr=in_situ_rir_sr,
-        overwrite=args.overwrite,
+        overwrite=overwrite_outputs,
         preserve_rms=args.preserve_rms,
         ir_tail_fade_ms=args.ir_tail_fade_ms,
     )
@@ -414,7 +510,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         output_root=ex_situ_root,
         rir=ex_situ_rir,
         rir_sr=ex_situ_rir_sr,
-        overwrite=args.overwrite,
+        overwrite=overwrite_outputs,
         preserve_rms=args.preserve_rms,
         ir_tail_fade_ms=args.ir_tail_fade_ms,
     )

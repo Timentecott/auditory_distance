@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Localise all audio files in an input folder by convolving them with a single RIR.
 
-This script mirrors the typical workflow used by tools that apply an RIR to dry audio:
 - Load a single RIR (NumPy .npy file, shape (n_samples,) or (n_samples, n_channels)).
 - For each audio file found under the input folder, optionally resample to the RIR sample rate,
   create a mono source (mix if necessary), convolve with each RIR channel, and save a multi-channel
@@ -145,7 +144,7 @@ def main(argv=None):
     parser.add_argument("--input", "-i", required=True, type=Path, help="Input file or folder containing dry audio files")
     parser.add_argument("--output", "-o", required=True, type=Path, help="Output folder to write localised audio (keeps subfolders)")
     parser.add_argument("--rir", "-r", required=True, type=Path, help="Path to RIR .npy file (array shape (n_samples,) or (n_samples, n_channels))")
-    parser.add_argument("--rir-sr", type=int, default=48000, help="Sample rate assumed for the RIR (Hz). Audio will be resampled to this rate if needed")
+    parser.add_argument("--rir-sr", type=int, default=44100, help="Sample rate assumed for the RIR (Hz). Audio will be resampled to this rate if needed")
     parser.add_argument("--preserve-rms", action='store_true', help="Scale localized output to preserve input RMS (default: False)")
     parser.add_argument("--max-amp", type=float, default=0.999, help="Maximum allowed peak amplitude to avoid clipping (default 0.999)")
     parser.add_argument("--overwrite", action='store_true', help="Overwrite existing output files")

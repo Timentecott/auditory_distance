@@ -12,138 +12,7 @@ import sounddevice as sd
 import soundfile as sf
 
 from pathlib import Path
-from scipy import signal
 import threading
-
-# Personal EQ is disabled for now because there is no local EQ file available.
-
-
-def apply_fade(audio, sample_rate, fade_ms=10):
-    """Apply short fade-in/out to reduce clicks at playback boundaries."""
-    fade_samples = int(sample_rate * fade_ms / 1000.0)
-    if fade_samples <= 0:
-        return audio
-
-    n_samples = audio.shape[0]
-    if n_samples < 2 * fade_samples:
-        fade_samples = n_samples // 2
-    if fade_samples <= 0:
-        return audio
-
-    fade_in = np.linspace(0.0, 1.0, fade_samples, endpoint=True)
-    fade_out = np.linspace(1.0, 0.0, fade_samples, endpoint=True)
-
-    audio = audio.copy()
-    if audio.ndim == 1:
-        audio[:fade_samples] *= fade_in
-        audio[-fade_samples:] *= fade_out
-    else:
-        audio[:fade_samples, :] *= fade_in[:, None]
-        audio[-fade_samples:, :] *= fade_out[:, None]
-    return audio
-
-
-def append_silence_tail(audio, sample_rate, tail_ms=20):
-    """Append a short silence tail to avoid device-end clicks on some outputs."""
-    tail_samples = int(sample_rate * tail_ms / 1000.0)
-    if tail_samples <= 0:
-        return audio
-
-    if audio.ndim == 1:
-        tail = np.zeros(tail_samples, dtype=audio.dtype)
-    else:
-        tail = np.zeros((tail_samples, audio.shape[1]), dtype=audio.dtype)
-    return np.concatenate([audio, tail], axis=0)
-
-
-def play_audio_on_stream(audio, stream):
-    """Play a block of audio through an already-open output stream."""
-    audio = np.asarray(audio, dtype=np.float32)
-    stream.write(audio)
-
-
-def play_audio_on_device(audio, sample_rate, device_index, mapping=None):
-    """Play a block of audio through a device using the same ASIO path as the device test script."""
-    audio = np.asarray(audio, dtype=np.float32)
-    print(f"  [play_audio_on_device] device={device_index}, mapping={mapping}, shape={audio.shape}, dtype={audio.dtype}")
-    sd.play(audio, samplerate=sample_rate, device=device_index, mapping=mapping)
-    sd.wait()
-    print(f"  [play_audio_on_device] playback complete")
-
-
-def apply_gain_db(audio, gain_db):
-    """Apply gain in dB to an audio array."""
-    return audio * (10 ** (gain_db / 20.0))
-
-
-def apply_bandpass_filter(audio, sample_rate, hp_freq=80, lp_freq=10000, order=4):
-    """
-    Apply high-pass and low-pass filters to reduce headphone/speaker differences.
-    
-    Args:
-        audio: Audio array
-        sample_rate: Sample rate in Hz
-        hp_freq: High-pass cutoff frequency in Hz (default 80 Hz)
-        lp_freq: Low-pass cutoff frequency in Hz (default 10000 Hz)
-        order: Filter order (default 4 for gentle slope)
-    
-    Returns:
-        Filtered audio array
-    """
-    if len(audio) == 0:
-        return audio
-    
-    # High-pass filter (remove low-frequency rumble/bass)
-    sos_hp = signal.butter(order, hp_freq, btype='high', fs=sample_rate, output='sos')
-    audio = signal.sosfilt(sos_hp, audio, axis=0)
-    
-    # Low-pass filter (remove high-frequency hiss/treble)
-    sos_lp = signal.butter(order, lp_freq, btype='low', fs=sample_rate, output='sos')
-    audio = signal.sosfilt(sos_lp, audio, axis=0)
-    
-    return audio
-
-
-def apply_device_specific_filter(audio, sample_rate, device_type='headphone', order=4, apply_hp=True, apply_lp=True):
-    """
-    Apply device-specific EQ to match frequency response between headphones and speakers.
-    
-    Args:
-        audio: Audio array
-        sample_rate: Sample rate in Hz
-        device_type: 'headphone' or 'speaker'
-        order: Filter order
-        apply_hp: If True, apply high-pass filter (default True)
-        apply_lp: If True, apply low-pass filter (default True)
-    
-    Returns:
-        Filtered audio array
-    """
-    if len(audio) == 0:
-        return audio
-    
-    if device_type == 'headphone':
-        # For headphones: reduce treble (tinny sound), keep some presence
-        # High-pass: 100 Hz (remove rumble)
-        # Low-pass: 7000 Hz (aggressive treble reduction for tinny correction)
-        hp_freq, lp_freq = 100, 7000
-    else:
-        # For speakers: gentler filtering, keep more bass and treble
-        # High-pass: 100 Hz (less aggressive)
-        # Low-pass: 7000 Hz (more treble)
-        hp_freq, lp_freq = 100, 7000
-    
-    # High-pass filter (optional)
-    if apply_hp:
-        sos_hp = signal.butter(order, hp_freq, btype='high', fs=sample_rate, output='sos')
-        audio = signal.sosfilt(sos_hp, audio, axis=0)
-    
-    # Low-pass filter (optional)
-    if apply_lp:
-        sos_lp = signal.butter(order, lp_freq, btype='low', fs=sample_rate, output='sos')
-        audio = signal.sosfilt(sos_lp, audio, axis=0)
-    
-    return audio
 
 
 def ensure_stereo(audio):
@@ -156,361 +25,171 @@ def ensure_stereo(audio):
 
 
 def route_to_asio_channels(audio, device_role):
-    """Route stereo audio to ASIO channel 1 for loudspeaker or channels 3-4 for headphone."""
+    """Route stereo audio to ASIO channel 1 for headphones or channels 3-4 for loudspeaker."""
     audio = ensure_stereo(np.asarray(audio))
     routed = np.zeros((audio.shape[0], 4), dtype=np.float32)
-    if device_role == 'speaker':
-        routed[:, 0] = audio[:, 0]  # Left channel to ASIO channel 1 only
-    elif device_role in ['in_situ_headphone', 'ex_situ_headphone']:
-        routed[:, 2:4] = audio[:, :2]
+
+    if device_role in ['in_situ_headphone', 'ex_situ_headphone']:
+        routed[:, 2:4] = audio[:, :2]   # ASIO channels 1-2
+    elif device_role == 'speaker':
+        routed[:, 0:2] = audio[:, :2]   # ASIO channels 3-4
     else:
         raise ValueError(f"Unknown device_role: {device_role}")
     return routed
 
+def resolve_output_sample_rate(device_index, preferred_rate=48000, channels=4, dtype='float32'):
+    """Pick a sample rate that the output device actually supports."""
+    device_info = sd.query_devices(device_index, 'output')
+    candidate_rates = []
+    for rate in [preferred_rate, device_info.get('default_samplerate'), 44100, 48000, 88200, 96000, 32000, 22050]:
+        if rate is None:
+            continue
+        rate = int(round(rate))
+        if rate not in candidate_rates:
+            candidate_rates.append(rate)
 
-def collapse_to_left_channel(audio, preserve_total_rms=True):
-    """
-    Collapse audio to left channel only for loudspeaker playback.
+    last_error = None
+    for rate in candidate_rates:
+        try:
+            sd.check_output_settings(device=device_index, samplerate=rate, channels=channels, dtype=dtype)
+            return rate
+        except Exception as exc:
+            last_error = exc
 
-    Converts stereo/mono to stereo with left = audio, right = 0 (silence).    
+    raise RuntimeError(
+        f"No supported output sample rate found for device {device_index} ({device_info['name']}): {last_error}"
+    )
 
-    Args:
-        audio: Audio array (mono or stereo)
-        preserve_total_rms: If True, scale the resulting single-channel-left
-            stereo so the overall RMS (across channels) matches the input's
-            RMS. This preserves the total signal energy when collapsing.
 
-    Returns:
-        Stereo audio array with right channel silenced. dtype matches input.
-    """
-    if audio is None:
-        return audio
-
-    # compute input RMS across all elements (samples x channels)
-    try:
-        audio_f = audio.astype(np.float64)
-    except Exception:
-        audio_f = np.array(audio, dtype=np.float64)
-
-    if audio_f.size == 0:
-        # empty input
-        if audio.ndim == 1:
-            return np.zeros((0, 2), dtype=audio.dtype)
-        return np.zeros((0, 2), dtype=audio.dtype)
-
-    orig_rms = np.sqrt(np.mean(np.square(audio_f)))
-
-    if audio.ndim == 1:
-        # Mono: convert to stereo with left = audio, right = silence
-        stereo = np.zeros((len(audio), 2), dtype=audio.dtype)
-        stereo[:, 0] = audio
-    elif audio.shape[1] >= 2:
-        # Stereo or multi-channel: keep left (channel 0), silence right
-        stereo = np.zeros_like(audio[:, :2])
-        stereo[:, 0] = audio[:, 0]
-    else:
-        # Single channel stereo-like array: convert to stereo
-        stereo = np.zeros((audio.shape[0], 2), dtype=audio.dtype)
-        stereo[:, 0] = audio[:, 0]
-
-    if preserve_total_rms:
-        # compute new RMS and scale to match original RMS
-        stereo_f = stereo.astype(np.float64)
-        new_rms = np.sqrt(np.mean(np.square(stereo_f)))
-        if new_rms > 0 and orig_rms > 0:
-            scale = float(orig_rms / new_rms)
-            stereo = (stereo_f * scale).astype(audio.dtype)
-
-    return stereo
-
-def run_loudness_calibration(win, headphones_device, speakers_device, sample_rate=48000):
-    """Calibrate headphone level against a fixed speaker reference using on-screen buttons."""
+def run_loudness_calibration(win, headphones_device, speakers_device, sample_rate=None):
+    """Play loudspeaker continuously, then alternate headphone and loudspeaker sounds every second."""
     from pathlib import Path
 
-    intro_speaker_file = Path(r"C:\Users\tim_e\source\repos\auditory_distance\experiment_1\loudspeaker_stimuli_23_6\noise\brown_noise_5s.wav")
-    headphone_file = Path(r"C:\Users\tim_e\source\repos\auditory_distance\experiment_1\ex_situ_stimuli_23_6\noise\brown_noise_5s.wav")
-    speaker_file = Path(r"C:\Users\tim_e\source\repos\auditory_distance\experiment_1\loudspeaker_stimuli_23_6\noise\brown_noise_5s.wav")
+    headphone_file = Path(r"C:\Users\tim_e\source\repos\auditory_distance\experiment_1\in_situ_2\noise\brown_noise_5s.wav")
+    speaker_file = Path(r"C:\Users\tim_e\source\repos\auditory_distance\experiment_1\loudspeaker_2\noise\brown_noise_5s.wav")
 
     if headphones_device != speakers_device:
         print(f"Warning: calibration will use device {speakers_device} for both speaker and headphone routing.")
 
-    if headphones_device != 18 or speakers_device != 18:
-        print("Warning: ASIO channel routing is configured for device index 16.")
+    if headphones_device != ASIO_AGGREGATE_DEVICE or speakers_device != ASIO_AGGREGATE_DEVICE:
+        print(f"Warning: ASIO channel routing is configured for device index {ASIO_AGGREGATE_DEVICE}.")
 
     def _load_audio_file(audio_path):
         audio, sr = sf.read(str(audio_path), dtype='float32', always_2d=False)
-        audio = np.asarray(audio, dtype=np.float32)
-        if sr != sample_rate:
-            n_samples = int(round(audio.shape[0] * (sample_rate / sr)))
-            if audio.ndim == 1:
-                audio = signal.resample(audio, n_samples)
-            else:
-                audio = np.column_stack([signal.resample(audio[:, ch], n_samples) for ch in range(audio.shape[1])])
-        return audio, sample_rate
+        return np.asarray(audio, dtype=np.float32), int(sr)
 
-    def _first_second(audio):
-        return audio[:sample_rate]
-
-    if not intro_speaker_file.exists():
-        raise FileNotFoundError(f"Missing intro loudspeaker file: {intro_speaker_file}")
     if not headphone_file.exists():
         raise FileNotFoundError(f"Missing headphone calibration file: {headphone_file}")
     if not speaker_file.exists():
         raise FileNotFoundError(f"Missing loudspeaker calibration file: {speaker_file}")
 
-    intro_audio, _ = _load_audio_file(intro_speaker_file)
-    headphone_audio_full, _ = _load_audio_file(headphone_file)
-    speaker_audio_full, _ = _load_audio_file(speaker_file)
+    headphone_audio, headphone_sr = _load_audio_file(headphone_file)
+    speaker_audio, speaker_sr = _load_audio_file(speaker_file)
 
-    intro_audio = apply_fade(ensure_stereo(_first_second(intro_audio)), sample_rate, fade_ms=20)
-    headphone_base = apply_fade(ensure_stereo(_first_second(headphone_audio_full)), sample_rate, fade_ms=20)
-    speaker_base = apply_fade(ensure_stereo(_first_second(speaker_audio_full)), sample_rate, fade_ms=20)
+    if headphone_sr != speaker_sr:
+        raise ValueError(f"Calibration audio files must share the same sample rate: [{headphone_sr}, {speaker_sr}]")
+    if sample_rate is None:
+        sample_rate = headphone_sr
+    elif int(sample_rate) != headphone_sr:
+        raise ValueError(f"Calibration sample rate {sample_rate} does not match audio file sample rate {headphone_sr}.")
+    sample_rate = int(sample_rate)
 
-    headphone_offset_db = 0.0
-    step_db = 1.0
-    calibration_log = []
+    one_second = sample_rate
+    headphone_segment = route_to_asio_channels(headphone_audio[:one_second], 'in_situ_headphone')
+    speaker_segment = route_to_asio_channels(speaker_audio[:one_second], 'speaker')
+    if headphone_segment.shape[0] == 0 or speaker_segment.shape[0] == 0:
+        raise ValueError("Calibration audio files must contain at least one second of audio.")
 
-    win.flip()
+    def make_loop_state(audio):
+        return {'audio': audio.astype(np.float32), 'pos': 0}
 
-    intro_text = visual.TextStim(
+    def make_loop_callback(state, lock):
+        def _callback(outdata, frame_count, time_info, status):
+            with lock:
+                audio = state['audio']
+                pos = state['pos']
+                end_pos = pos + frame_count
+                if end_pos <= audio.shape[0]:
+                    outdata[:] = audio[pos:end_pos]
+                    state['pos'] = end_pos % audio.shape[0]
+                else:
+                    first = audio[pos:]
+                    remaining = frame_count - len(first)
+                    second = audio[:remaining]
+                    outdata[:len(first)] = first
+                    outdata[len(first):] = second
+                    state['pos'] = remaining % audio.shape[0]
+        return _callback
+
+    speaker_state = make_loop_state(speaker_segment)
+    speaker_lock = threading.Lock()
+    speaker_text = visual.TextStim(
         win,
         text=(
-            "Loudspeaker preview\n\n"
-            "You will first hear continuous brown noise from the loudspeaker.\n"
-            "Press any key when ready to start the calibration."
+            "Calibration preview\n\n"
+            "You will now hear a continuous loudspeaker sound.\n"
+            "Press any key to switch to the alternating calibration."
         ),
         color='white',
         height=30,
         wrapWidth=1100
     )
-    intro_text.draw()
+    speaker_text.draw()
     win.flip()
-
-    intro_state = {
-        'audio': route_to_asio_channels(intro_audio, 'speaker'),
-        'pos': 0,
-    }
-    intro_lock = threading.Lock()
-
-    def intro_callback(outdata, frame_count, time_info, status):
-        with intro_lock:
-            audio = intro_state['audio']
-            pos = intro_state['pos']
-            if audio is None or audio.shape[0] == 0:
-                outdata[:] = 0
-                return
-
-            end_pos = pos + frame_count
-            if end_pos <= audio.shape[0]:
-                outdata[:] = audio[pos:end_pos]
-                intro_state['pos'] = end_pos % audio.shape[0]
-            else:
-                first = audio[pos:]
-                remaining = frame_count - len(first)
-                second = audio[:remaining]
-                outdata[:len(first)] = first
-                outdata[len(first):] = second
-                intro_state['pos'] = remaining % audio.shape[0]
 
     with sd.OutputStream(
         samplerate=sample_rate,
         device=speakers_device,
         channels=4,
         dtype='float32',
-        callback=intro_callback,
+        callback=make_loop_callback(speaker_state, speaker_lock),
         latency='low',
     ):
         while True:
             if event.getKeys():
                 break
-            intro_text.draw()
+            speaker_text.draw()
             win.flip()
             core.wait(0.01)
 
-    old_mouse_visible = win.mouseVisible
-    win.mouseVisible = True
-    mouse = event.Mouse(win=win)
-
-    plus_box = visual.Rect(win, pos=(-320, -260), width=180, height=90, fillColor='darkgreen', lineColor='white')
-    minus_box = visual.Rect(win, pos=(0, -260), width=180, height=90, fillColor='darkred', lineColor='white')
-    store_box = visual.Rect(win, pos=(320, -260), width=220, height=90, fillColor='darkblue', lineColor='white')
-
-    plus_text = visual.TextStim(win, text='+', pos=(-320, -260), color='white', height=48)
-    minus_text = visual.TextStim(win, text='-', pos=(0, -260), color='white', height=48)
-    store_text = visual.TextStim(win, text='Store', pos=(320, -260), color='white', height=34)
-
-    status_text = visual.TextStim(win, text='', pos=(0, 220), color='white', height=28, wrapWidth=1200)
-    info_text = visual.TextStim(win, text='', pos=(0, 160), color='white', height=24, wrapWidth=1200)
-    big_one = visual.TextStim(win, text='1', pos=(-280, -20), color='white', height=80)
-    big_two = visual.TextStim(win, text='2', pos=(280, -20), color='white', height=80)
-
-    def draw_calibration_screen(message='', phase_label=''):
-        plus_box.draw()
-        minus_box.draw()
-        store_box.draw()
-        plus_text.draw()
-        minus_text.draw()
-        store_text.draw()
-        big_one.draw()
-        big_two.draw()
-        status_text.setText(phase_label)
-        status_text.draw()
-        info_text.setText(f"Current adjustment for 1: {headphone_offset_db:+.1f} dB\n{message}")
-        info_text.draw()
-        win.flip()
-
-    mouse.clickReset()
-    prev_mouse_down = False
-    store_selected = False
-
-    sd.default.latency = 'low'
-    playback_state = {
-        'audio': None,
-        'pos': 0,
-    }
-    state_lock = threading.Lock()
-
-    def build_cycle_audio():
-        headphone_audio = ensure_stereo(headphone_base.copy() * (10 ** (headphone_offset_db / 20.0)))
-        headphone_routed = route_to_asio_channels(headphone_audio, 'in_situ_headphone')
-        speaker_routed = route_to_asio_channels(speaker_base, 'speaker')
-        cycle = np.concatenate([headphone_routed, speaker_routed], axis=0)
-        return np.concatenate([cycle, cycle], axis=0)
-
-    def rebuild_playback_buffer():
-        with state_lock:
-            playback_state['audio'] = build_cycle_audio()
-            playback_state['pos'] = 0
-
-    rebuild_playback_buffer()
-
-    def maybe_handle_click():
-        nonlocal headphone_offset_db, prev_mouse_down, store_selected
-        mouse_down = mouse.getPressed()[0]
-        if mouse_down and not prev_mouse_down:
-            if plus_box.contains(mouse):
-                headphone_offset_db += step_db
-                calibration_log.append(headphone_offset_db)
-                rebuild_playback_buffer()
-                print(f"Sound 1 increased to {headphone_offset_db:+.1f} dB")
-            elif minus_box.contains(mouse):
-                headphone_offset_db -= step_db
-                calibration_log.append(headphone_offset_db)
-                rebuild_playback_buffer()
-                print(f"Sound 1 decreased to {headphone_offset_db:+.1f} dB")
-            elif store_box.contains(mouse):
-                store_selected = True
-        prev_mouse_down = mouse_down
-
-    def calibration_callback(outdata, frame_count, time_info, status):
-        with state_lock:
-            audio = playback_state['audio']
-            pos = playback_state['pos']
-            if audio is None:
-                outdata[:] = 0
-                return
-            end_pos = pos + frame_count
-            if end_pos <= audio.shape[0]:
-                outdata[:] = audio[pos:end_pos]
-                playback_state['pos'] = end_pos
-            else:
-                first = audio[pos:]
-                remaining = frame_count - len(first)
-                second = audio[:remaining]
-                outdata[:len(first)] = first
-                outdata[len(first):] = second
-                playback_state['pos'] = remaining
-
-    try:
-        with sd.OutputStream(
-            samplerate=sample_rate,
-            device=speakers_device,
-            channels=4,
-            dtype='float32',
-            callback=calibration_callback,
-            latency='low',
-        ):
-            while not store_selected:
-                maybe_handle_click()
-                draw_calibration_screen("Adjust sound 1 until it matches sound 2.", "Playing: 1 -> 2")
-                core.wait(0.01)
-    finally:
-        sd.stop()
-
-    done = visual.TextStim(
+    cycle_audio = np.concatenate([headphone_segment, speaker_segment], axis=0)
+    playback_state = {'audio': cycle_audio, 'pos': 0}
+    playback_lock = threading.Lock()
+    alternating_text = visual.TextStim(
         win,
         text=(
-            "Calibration complete.\n\n"
-            f"Adjustment to apply to sound 1: {headphone_offset_db:+.1f} dB\n\n"
-            "Press any key to continue to practice trials."
+            "Calibration preview\n\n"
+            "Headphone and loudspeaker sounds will alternate every second.\n"
+            "Adjust your external audio devices as needed.\n\n"
+            "Press any key to continue."
         ),
         color='white',
-        height=28,
-        wrapWidth=1000
+        height=30,
+        wrapWidth=1100
     )
-    done.draw()
+    alternating_text.draw()
     win.flip()
-    event.waitKeys()
-    win.mouseVisible = old_mouse_visible
-    print(f"\nCalibration log: {calibration_log}")
-    return headphone_offset_db, 0.0
 
-
-def create_playback_streams(headphones_device, speakers_device, sample_rate):
-    """Open persistent playback streams for headphone and speaker output."""
-    return None, None
-
-
-def create_experiment_playback_controller(device, sample_rate, channels=4):
-    """Create a persistent output stream and shared state for non-blocking trial playback."""
-    playback_state = {
-        'audio': np.zeros((1, channels), dtype=np.float32),
-        'pos': 0,
-    }
-    state_lock = threading.Lock()
-
-    def callback(outdata, frame_count, time_info, status):
-        with state_lock:
-            audio = playback_state['audio']
-            pos = playback_state['pos']
-            end_pos = pos + frame_count
-
-            if pos >= audio.shape[0]:
-                outdata[:] = 0
-                playback_state['pos'] = end_pos
-                return
-
-            if end_pos <= audio.shape[0]:
-                outdata[:] = audio[pos:end_pos]
-                playback_state['pos'] = end_pos
-            else:
-                first = audio[pos:]
-                outdata[:len(first)] = first
-                outdata[len(first):] = 0
-                playback_state['pos'] = audio.shape[0]
-
-    stream = sd.OutputStream(
+    with sd.OutputStream(
         samplerate=sample_rate,
-        device=device,
-        channels=channels,
+        device=speakers_device,
+        channels=4,
         dtype='float32',
-        callback=callback,
+        callback=make_loop_callback(playback_state, playback_lock),
         latency='low',
-    )
-    return stream, playback_state, state_lock
-
-
-def set_experiment_audio(playback_state, state_lock, audio):
-    """Swap in the next trial audio buffer for the persistent playback stream."""
-    with state_lock:
-        playback_state['audio'] = np.asarray(audio, dtype=np.float32)
-        playback_state['pos'] = 0
+    ):
+        while True:
+            if event.getKeys():
+                break
+            alternating_text.draw()
+            win.flip()
+            core.wait(0.01)
 
 #load headphone stimuli from /localised_stimuli
 base_dir = os.path.dirname(__file__) if '__file__' in globals() else os.getcwd()
-in_situ_headphone_dir = os.path.join(base_dir, 'in_situ_stimuli_23_6')
-ex_situ_headphone_dir = os.path.join(base_dir, 'ex_situ_stimuli_23_6')
-speaker_dir = os.path.join(base_dir, 'loudspeaker_stimuli_23_6')
+in_situ_headphone_dir = os.path.join(base_dir, 'in_situ_2')
+ex_situ_headphone_dir = os.path.join(base_dir, 'ex_situ_2')
+speaker_dir = os.path.join(base_dir, 'loudspeaker_2')
 _audio_exts = ('*.wav', '*.flac', '*.mp3', '*.aiff', '*.ogg') 
 
 
@@ -616,104 +295,7 @@ def fetch_individual_eq(participant_id):
     print(f"Warning: Individual EQ file not found for participant {participant_id}: {eq_file}")
     return None
 
-
-def _design_peaking_sos(f0_hz, gain_db, q, sample_rate):
-    nyquist = sample_rate / 2.0
-    if f0_hz <= 0 or f0_hz >= nyquist:
-        return None
-
-    amplitude = 10.0 ** (gain_db / 40.0)
-    w0 = 2.0 * np.pi * (f0_hz / sample_rate)
-    cos_w0 = np.cos(w0)
-    sin_w0 = np.sin(w0)
-    alpha = sin_w0 / (2.0 * q)
-
-    b0 = 1.0 + alpha * amplitude
-    b1 = -2.0 * cos_w0
-    b2 = 1.0 - alpha * amplitude
-    a0 = 1.0 + alpha / amplitude
-    a1 = -2.0 * cos_w0
-    a2 = 1.0 - alpha / amplitude
-
-    if a0 == 0:
-        return None
-
-    return np.array([
-        b0 / a0,
-        b1 / a0,
-        b2 / a0,
-        1.0,
-        a1 / a0,
-        a2 / a0,
-    ], dtype=np.float64)
-
-
-def _load_individual_eq(eq_file):
-    freqs = []
-    gains_db = []
-
-    with Path(eq_file).open('r', encoding='utf-8') as handle:
-        for raw_line in handle:
-            line = raw_line.strip()
-            if not line or line.startswith('#'):
-                continue
-
-            parts = line.replace(',', ' ').split()
-            try:
-                values = [float(value) for value in parts]
-            except ValueError:
-                continue
-
-            if len(values) < 2:
-                continue
-
-            freqs.append(values[0])
-            gains_db.append(values[1])
-
-    if not freqs:
-        raise ValueError(f"No valid EQ rows found in: {eq_file}")
-
-    freqs = np.asarray(freqs, dtype=np.float64)
-    gains_db = np.asarray(gains_db, dtype=np.float64)
-    order = np.argsort(freqs)
-    return freqs[order], gains_db[order]
-
-
-def apply_individual_eq(audio, eq_file, sample_rate):
-    """Apply participant-specific headphone EQ to audio using a Q=5 peaking filter bank."""
-    if eq_file is None:
-        return audio
-
-    audio = np.asarray(audio, dtype=np.float32)
-    freqs_hz, gains_db = _load_individual_eq(eq_file)
-
-    sos_rows = []
-    for f0_hz, gain_db in zip(freqs_hz, gains_db):
-        if abs(float(gain_db)) < 1e-9:
-            continue
-        row = _design_peaking_sos(float(f0_hz), float(gain_db), q=5.0, sample_rate=sample_rate)
-        if row is not None:
-            sos_rows.append(row)
-
-    if not sos_rows:
-        return audio
-
-    sos = np.vstack(sos_rows)
-    if audio.ndim == 1:
-        processed = signal.sosfilt(sos, audio.astype(np.float64))
-        processed = processed.astype(np.float32)
-    else:
-        channels = []
-        for channel_index in range(audio.shape[1]):
-            channel_audio = signal.sosfilt(sos, audio[:, channel_index].astype(np.float64))
-            channels.append(channel_audio.astype(np.float32))
-        processed = np.column_stack(channels)
-
-    peak = float(np.max(np.abs(processed))) if processed.size else 0.0
-    if peak > 1.0:
-        processed = processed / peak
-
-    return processed
+# Individual EQ processing removed (functions _design_peaking_sos, _load_individual_eq, apply_individual_eq)
 
 
 def append_result(presentation_type, stimulus, response, rt, accuracy, stimulus_category=None, gain_db=None, trial_type='experimental', block=None):
@@ -1114,12 +696,13 @@ individual_eq_file = fetch_individual_eq(participant_id)
 fixation = visual.TextStim(win, text='+', color='white', height=50)
 
 # Audio device indices (adjust these)
-ASIO_AGGREGATE_DEVICE = 16  # ASIO4ALL v2 aggregate: 4 output channels
+ASIO_AGGREGATE_DEVICE = 12  # ASIO4ALL v2 aggregate: 4 output channels
 ASIO_SPEAKER_MAPPING = [1, 2]
 ASIO_HEADPHONE_MAPPING = [3, 4]
 headphones_device = ASIO_AGGREGATE_DEVICE
 speakers_device = ASIO_AGGREGATE_DEVICE
-sample_rate = 48000  # Default sample rate for audio playback
+sample_rate = resolve_output_sample_rate(ASIO_AGGREGATE_DEVICE, preferred_rate=44100)
+print(f"Using sample rate {sample_rate} Hz for ASIO device {ASIO_AGGREGATE_DEVICE}.")
 
 #repeat for x trials. each new trial should be on a new row in the results table
 # Run trials in 3 blocks with breaks
@@ -1301,7 +884,7 @@ response_feedback = visual.TextStim(
 )
 
 # Loudness calibration before practice trials
-headphone_level_offset_db, speaker_level_offset_db = run_loudness_calibration(
+run_loudness_calibration(
     win,
     headphones_device=headphones_device,
     speakers_device=speakers_device,
@@ -1407,26 +990,10 @@ try:
         rt = 0
         try:
             audio_data, fs = sf.read(stimulus)
+            if fs != sample_rate:
+                raise ValueError(f"Stimulus sample rate {fs} does not match output sample rate {sample_rate} for {stimulus}.")
             samples_5s = int(5 * fs)
             audio_5s = audio_data[:samples_5s]
-            gain_db = random.uniform(0, 0) # random gain can be adjusted currently zero
-            if is_headphone_like(playback_type):
-                gain_db += headphone_level_offset_db
-            else:
-                gain_db += speaker_level_offset_db
-            gain_linear = 10 ** (gain_db / 20)
-            audio_5s = audio_5s * gain_linear
-
-            if audio_5s.ndim > 1 and playback_type == 'speaker':
-                audio_5s = audio_5s.mean(axis=1)
-            audio_5s = apply_device_specific_filter(audio_5s, fs, device_type='headphone' if is_headphone_like(playback_type) else 'speaker', order=4)
-
-            if playback_type == 'speaker':
-                audio_5s = collapse_to_left_channel(audio_5s, preserve_total_rms=True)
-
-            audio_5s = ensure_stereo(audio_5s)
-            audio_5s = apply_fade(audio_5s, fs, fade_ms=50)
-            audio_5s = append_silence_tail(audio_5s, fs, tail_ms=20)
             routed_audio = route_to_asio_channels(audio_5s, playback_type)
 
             print(f"Practice {p+1}/{practice_trials}: {playback_type} via device {device} ({stim_category})")
@@ -1513,6 +1080,31 @@ finally:
     practice_stream.stop()
     practice_stream.close()
 
+# Display post-practice instructions
+practice_complete_text = visual.TextStim(
+    win,
+    text=(
+        "Practice complete! Please ask Tim if you have any questions. "
+        "If not, he will leave the room now.\n\n"
+        "Remember to keep your head still.\n\n"
+        "When you are ready, press any key to begin.\n\n"
+        "You will get a break after 1/3 and 2/3 of the trials."
+    ),
+    color='white',
+    height=30,
+    wrapWidth=1100
+)
+practice_complete_text.draw()
+win.flip()
+
+# Wait for key press
+while True:
+    if event.getKeys():
+        break
+    practice_complete_text.draw()
+    win.flip()
+    core.wait(0.01)
+
 # --- End practice trials ---
 
 # --- Main experimental trials ---
@@ -1586,30 +1178,11 @@ try:
             rt = 0
             try:
                 audio_data, fs = sf.read(stimulus)
-                # Play only first 5 seconds
+                if fs != sample_rate:
+                    raise ValueError(f"Stimulus sample rate {fs} does not match output sample rate {sample_rate} for {stimulus}.")
                 samples_5s = int(5 * fs)
                 audio_5s = audio_data[:samples_5s]
-                # Apply random gain between -5 and +5 dB
-                gain_db = random.uniform(-2 , 2)
-                if is_headphone_like(playback_type):
-                    gain_db += headphone_level_offset_db
-                else:
-                    gain_db += speaker_level_offset_db
-                gain_linear = 10 ** (gain_db / 20)
-                audio_5s = audio_5s * gain_linear
-
-                if audio_5s.ndim > 1 and playback_type == 'speaker':
-                    audio_5s = audio_5s.mean(axis=1)
-                audio_5s = apply_device_specific_filter(audio_5s, fs, device_type='headphone' if is_headphone_like(playback_type) else 'speaker', order=4)
-
-                if playback_type == 'speaker':
-                    audio_5s = collapse_to_left_channel(audio_5s, preserve_total_rms=True)
-
-                audio_5s = ensure_stereo(audio_5s)
-                audio_5s = apply_fade(audio_5s, fs, fade_ms=20)
-                audio_5s = append_silence_tail(audio_5s, fs, tail_ms=20)
-                
-                # Route audio to appropriate ASIO channels
+                gain_db = 0.0
                 routed_audio = route_to_asio_channels(audio_5s, playback_type)
 
                 # Debug: log routing

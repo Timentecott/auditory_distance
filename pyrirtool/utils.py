@@ -42,6 +42,40 @@ def saverecording(RIR, RIRtoSave, testsignal, recorded, fs):
             wavwrite(dirname+ '/sigrec' + str(idx+1) + '.wav',fs,recorded[:,idx])
             wavwrite(dirname+ '/RIR' + str(idx+1) + '.wav',fs,RIR[:,idx])
 
+        # Create a cropped RIR that starts at the direct arrival and save it as RIRcrop.npy
+        try:
+            # Compute a robust detection of the first arrival across channels
+            peak = np.max(np.abs(RIR))
+            if peak <= 0:
+                # fallback: no cropping if RIR is silent
+                start_idx = 0
+            else:
+                thresh = peak * 0.05  # 5% of peak
+                first_idxs = []
+                for ch in range(RIR.shape[1]):
+                    ch_abs = np.abs(RIR[:, ch])
+                    above = np.where(ch_abs >= thresh)[0]
+                    if above.size > 0:
+                        first_idxs.append(above[0])
+                    else:
+                        # fallback to absolute max for this channel
+                        first_idxs.append(int(np.argmax(ch_abs)))
+
+                # take the earliest detected arrival across channels
+                start_idx = int(np.min(first_idxs))
+
+                # keep a small pre-roll (~5 ms) to preserve onset
+                pre_samples = int(0.005 * fs)
+                start_idx = max(0, start_idx - pre_samples)
+
+            RIRcrop = RIR[start_idx:, :]
+            np.save(dirname + '/RIRcrop.npy', RIRcrop)
+            # also save in lastRecording for quick check
+            np.save('recorded/lastRecording/RIRcrop.npy', RIRcrop)
+        except Exception:
+            # If anything goes wrong, skip cropping but continue saving
+            pass
+
         # Save in the recorded/lastRecording for a quick check
         np.save('recorded/lastRecording/RIR.npy',RIR)
         np.save( 'recorded/lastRecording/RIRac.npy',RIRtoSave)
