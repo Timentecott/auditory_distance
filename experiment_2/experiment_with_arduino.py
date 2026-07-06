@@ -9,15 +9,22 @@ import numpy as np
 import random
 from threading import Lock
 from scipy import signal
+import serial
+import serial.tools.list_ports
+import time
 
 # Experiment parameters
 NUMBER_OF_TRIALS = 12  # Must be divisible by 3 (3 presentation types: loudspeaker, ex_situ, in_situ) and by 2 for valid/invalid balance
 FIXATION_DURATION = 0.5  # seconds
 SOUND_CUE_DURATION = 0.200  # seconds
 CUE_TO_DOT_ISI = 0.25  # seconds includes 100ms cue duration
-DOT_DURATION = 0.5  # seconds
+LED_FLASH_DURATION = 0.2  # seconds (was DOT_DURATION, now for LED flash)
 INTER_TRIAL_INTERVAL = 1.5  # seconds
 RESPONSE_TIMEOUT = 3.0  # Maximum time to wait for response in seconds
+
+# Raspberry Pi Pico communication parameters
+PICO_BAUD_RATE = 115200
+PICO_TIMEOUT = 2.0  # seconds
 # Set to the ASIO aggregate output device index that exposes 4 output channels.
 # Channels 3-4 are used for headphone playback.
 AUDIO_OUTPUT_DEVICE_INDEX = 12
@@ -158,6 +165,158 @@ def get_direction_response():
     return None
 
 
+# Raspberry Pi Pico communication functions
+pico_serial = None
+
+def find_pico_port():
+    """Auto-detect Raspberry Pi Pico COM port. Returns port name or None if not found."""
+    ports = serial.tools.list_ports.comports()
+    for port in ports:
+        # Common Pico identifiers
+        if 'Pico' in port.description or 'RP2040' in port.description or 'USB' in port.description:
+            return port.device
+    # If no specific Pico found, try common ports
+    if ports:
+        return ports[0].device
+    return None
+
+
+def connect_pico():
+    """Establish serial connection to Raspberry Pi Pico."""
+    global pico_serial
+    try:
+        port = find_pico_port()
+        if port is None:
+            print("[PICO] No Raspberry Pi Pico port found!")
+            return False
+
+        pico_serial = serial.Serial(port, PICO_BAUD_RATE, timeout=PICO_TIMEOUT)
+        time.sleep(2)  # Wait for Pico to initialize
+        print(f"[PICO] Connected to Raspberry Pi Pico on port {port}")
+        return True
+    except Exception as e:
+        print(f"[PICO] Failed to connect: {e}")
+        return False
+
+
+def disconnect_pico():
+    """Close serial connection to Raspberry Pi Pico."""
+    global pico_serial
+    if pico_serial and pico_serial.is_open:
+        pico_serial.close()
+        print("[PICO] Disconnected from Raspberry Pi Pico")
+
+
+def send_led_command(location):
+    """Send LED trigger command to Pico.
+
+    Args:
+        location: 'near' or 'far'
+
+    Returns:
+        True if command sent successfully, False otherwise
+    """
+    if not pico_serial or not pico_serial.is_open:
+        print("[PICO] Serial port not open!")
+        return False
+
+    try:
+        # Map location to LED command
+        # Pin 15 = near, Pin 16 = far
+        # '1' = Pin 15 ON, '0' = Pin 15 OFF
+        # '3' = Pin 16 ON, '2' = Pin 16 OFF
+        if location == 'near':
+            command = '1'  # Pin 15 ON
+        elif location == 'far':
+            command = '3'  # Pin 16 ON
+        else:
+            print(f"[PICO] Unknown location: {location}")
+            return False
+
+        pico_serial.write(command.encode())
+        print(f"[PICO] Sent command for {location}: {command}")
+        return True
+    except Exception as e:
+        print(f"[PICO] Failed to send command: {e}")
+        return False
+
+
+def wait_for_led_complete():
+    """Wait for LED flash to complete.
+
+    The Pico flashes the LED for LED_FLASH_DURATION, so we just wait
+    for that duration plus a small buffer.
+
+    Returns:
+        True (always succeeds since it's just a timer)
+    """
+    if not pico_serial or not pico_serial.is_open:
+        print("[PICO] Serial port not open!")
+        return False
+
+    try:
+        # Wait for the LED flash duration
+        time.sleep(LED_FLASH_DURATION + 0.1)  # Add small buffer
+        print("[PICO] LED flash complete")
+        return True
+    except Exception as e:
+        print(f"[PICO] Error during LED wait: {e}")
+        return False
+
+
+def send_led_off_command(location):
+    """Send LED OFF command to turn off the LED after flash.
+
+    Args:
+        location: 'near' or 'far'
+
+    Returns:
+        True if command sent successfully, False otherwise
+    """
+    if not pico_serial or not pico_serial.is_open:
+        print("[PICO] Serial port not open!")
+        return False
+
+    try:
+        # Map location to LED OFF command
+        # '0' = Pin 15 OFF, '2' = Pin 16 OFF
+        if location == 'near':
+            command = '0'  # Pin 15 OFF
+        elif location == 'far':
+            command = '2'  # Pin 16 OFF
+        else:
+            print(f"[PICO] Unknown location: {location}")
+            return False
+
+        pico_serial.write(command.encode())
+        print(f"[PICO] Sent OFF command for {location}: {command}")
+        return True
+    except Exception as e:
+        print(f"[PICO] Failed to send OFF command: {e}")
+        return False
+
+
+def trigger_led_flash(location):
+    """Trigger LED flash and wait for completion.
+
+    Args:
+        location: 'near' or 'far'
+
+    Returns:
+        True if LED flash completed successfully
+    """
+    if not send_led_command(location):
+        return False
+
+    # Wait for the flash duration
+    time.sleep(LED_FLASH_DURATION)
+
+    # Turn off the LED
+    send_led_off_command(location)
+
+    return True
+
+
 def play_cue(presentation_type, location_name):
     """Play the first 100 ms of a cue using the persistent output stream.
 
@@ -209,6 +368,11 @@ win = visual.Window(
 )
 win.mouseVisible = False
 kb = keyboard.Keyboard()
+
+# Initialize Pico connection
+if not connect_pico():
+    print("[WARNING] Pico connection failed. Experiment may not function properly.")
+    # Continue anyway - tests can run without Pico for development
 
 
 def get_text_input(prompt_text):
@@ -605,27 +769,29 @@ for practice_trial in practice_trials:
     kb.clearEvents()
     response = None
 
-    # Draw perspective room and dot according to near/far distance (dot overlays the room)
-    # Responses can be made during this period
-    dot_display_start = core.getTime()
-    while core.getTime() - dot_display_start < DOT_DURATION:
+    # Trigger LED flash at target location for practice - responses can be made during this period
+    led_flash_start = core.getTime()
+    trigger_led_flash(dot_location)
+
+    # Keep showing fixation during LED flash duration
+    led_flash_end_time = led_flash_start + LED_FLASH_DURATION
+    while core.getTime() < led_flash_end_time:
         draw_perspective_room(perspective_elements)
-        draw_dot_in_room(perspective_elements, dot_location)
         fixation.draw()
         win.flip()
 
-        # Check for response during dot display
+        # Check for response during LED flash
         if response is None:
             response = get_direction_response()
 
         core.wait(0.01)  # Small wait to prevent excessive CPU usage
 
-    # After the dot disappears, show the room with fixation while waiting for response
+    # After the LED flash, show the room with fixation while waiting for response
     draw_perspective_room(perspective_elements)
     fixation.draw()
     win.flip()
 
-    # Wait for response if none was made during dot display
+    # Wait for response if none was made during LED flash
     while response is None:
         response = get_direction_response()
 
@@ -850,16 +1016,18 @@ for trial_num in range(NUMBER_OF_TRIALS):
     response = None
     response_time = None
 
-    # Display dot at appropriate location for DOT_DURATION within the perspective room
-    # Responses can be made during this period
-    dot_display_start = core.getTime()
-    while core.getTime() - dot_display_start < DOT_DURATION:
+    # Trigger LED flash at target location - responses can be made during this period
+    led_flash_start = core.getTime()
+    trigger_led_flash(dot_location)
+
+    # Keep showing fixation during LED flash duration (for consistency with visual timing)
+    led_flash_end_time = led_flash_start + LED_FLASH_DURATION
+    while core.getTime() < led_flash_end_time:
         draw_perspective_room(perspective_elements)
-        draw_dot_in_room(perspective_elements, dot_location)
         fixation.draw()
         win.flip()
 
-        # Check for response during dot display
+        # Check for response during LED flash
         if response is None:
             response = get_direction_response()
             if response is not None:
@@ -867,12 +1035,12 @@ for trial_num in range(NUMBER_OF_TRIALS):
 
         core.wait(0.01)  # Small wait to prevent excessive CPU usage
 
-    # After dot disappears, show room and fixation, wait for response if none was given
+    # After LED flash, show room and fixation, wait for response if none was given
     draw_perspective_room(perspective_elements)
     fixation.draw()
     win.flip()
 
-    # Wait for arrow key response if none was made during dot display
+    # Wait for arrow key response if none was made during LED flash
     while response is None:
         response = get_direction_response()
         if response is not None:
@@ -966,6 +1134,7 @@ win.flip()
 core.wait(2)
 
 # Cleanup
+disconnect_pico()
 sd.stop()
 cue_stream.stop()
 cue_stream.close()
