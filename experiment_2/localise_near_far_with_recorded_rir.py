@@ -111,16 +111,25 @@ def normalize_audio(audio, max_amp=0.999):
     target_rms_dbfs = -20.0
     target_rms_linear = 10.0 ** (target_rms_dbfs / 20.0)
 
-    # Scale to target RMS
+    # Compute current RMS and peak before scaling
     current_rms = compute_rms(audio)
-    if current_rms > 0:
-        scale = target_rms_linear / current_rms
-        audio = audio * scale
-
-    # Avoid clipping
     peak = float(np.max(np.abs(audio))) if audio.size > 0 else 0.0
-    if peak > max_amp:
-        audio = audio * (max_amp / peak)
+
+    if current_rms <= 0 or peak <= 0:
+        return audio
+
+    # Calculate scale factor to achieve target RMS
+    scale_for_rms = target_rms_linear / current_rms
+
+    # Calculate scale factor to prevent clipping
+    scale_for_clipping = max_amp / peak
+
+    # Use the smaller scale factor to satisfy both constraints
+    # This ensures we don't exceed max_amp while getting as close to -20 dBFS as possible
+    scale = min(scale_for_rms, scale_for_clipping)
+
+    # Apply single scaling operation
+    audio = audio * scale
 
     return audio
 
