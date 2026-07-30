@@ -32,7 +32,7 @@ def route_to_asio_channels(audio, device_role):
     if device_role in ['in_situ_headphone', 'ex_situ_headphone']:
         routed[:, 2:4] = audio[:, :2]   # ASIO channels 1-2
     elif device_role == 'speaker':
-        routed[:, 0:2] = audio[:, :2]   # ASIO channels 3-4
+        routed[:, 1:3] = audio[:, :2]   # ASIO channels 3-4
     else:
         raise ValueError(f"Unknown device_role: {device_role}")
     return routed
@@ -65,8 +65,8 @@ def run_loudness_calibration(win, headphones_device, speakers_device, sample_rat
     """Play loudspeaker continuously, then alternate headphone and loudspeaker sounds every second."""
     from pathlib import Path
 
-    headphone_file = Path(r"C:\Users\tim_e\source\repos\auditory_distance\experiment_1\in_situ_2\noise\brown_noise_5s.wav")
-    speaker_file = Path(r"C:\Users\tim_e\source\repos\auditory_distance\experiment_1\loudspeaker_2\noise\brown_noise_5s.wav")
+    headphone_file = Path(r"C:\Users\tim_e\source\repos\auditory_distance\experiment_1\in_situ_2707\noise\brown_noise_5s.wav")
+    speaker_file = Path(r"C:\Users\tim_e\source\repos\auditory_distance\experiment_1\loudspeaker_2707\noise\brown_noise_5s.wav")
 
     if headphones_device != speakers_device:
         print(f"Warning: calibration will use device {speakers_device} for both speaker and headphone routing.")
@@ -187,9 +187,9 @@ def run_loudness_calibration(win, headphones_device, speakers_device, sample_rat
 
 #load headphone stimuli from /localised_stimuli
 base_dir = os.path.dirname(__file__) if '__file__' in globals() else os.getcwd()
-in_situ_headphone_dir = os.path.join(base_dir, 'in_situ_2')
-ex_situ_headphone_dir = os.path.join(base_dir, 'ex_situ_2')
-speaker_dir = os.path.join(base_dir, 'loudspeaker_2')
+in_situ_headphone_dir = os.path.join(base_dir, 'in_situ_2707')
+ex_situ_headphone_dir = os.path.join(base_dir, 'ex_situ_2707')
+speaker_dir = os.path.join(base_dir, 'loudspeaker_2707')
 _audio_exts = ('*.wav', '*.flac', '*.mp3', '*.aiff', '*.ogg') 
 
 

@@ -14,13 +14,16 @@ import serial.tools.list_ports
 import time
 
 # Experiment parameters
-NUMBER_OF_TRIALS = 12  # Must be divisible by 3 (3 presentation types: loudspeaker, ex_situ, in_situ) and by 2 for valid/invalid balance
+NUMBER_OF_TRIALS = 120  # 3 blocks x 12 trials (loudspeaker only with varying CUE_TO_DOT_ISI)
 FIXATION_DURATION = 0.5  # seconds
-SOUND_CUE_DURATION = 0.200  # seconds
-CUE_TO_DOT_ISI = 0.25  # seconds includes 100ms cue duration
+SOUND_CUE_DURATION = 0.175  # seconds (constant across all blocks)
+CUE_TO_DOT_ISI = 0.25  # seconds (will be overridden per block)
 LED_FLASH_DURATION = 0.2  # seconds (was DOT_DURATION, now for LED flash)
 INTER_TRIAL_INTERVAL = 1.5  # seconds
 RESPONSE_TIMEOUT = 3.0  # Maximum time to wait for response in seconds
+
+# CUE_TO_DOT_ISI values for each block
+CUE_TO_DOT_ISI_BY_BLOCK = [0.2, 0.275, 0.35]  # seconds for blocks 1, 2, 3
 
 # Raspberry Pi Pico communication parameters
 PICO_BAUD_RATE = 115200
@@ -139,7 +142,8 @@ def wait_for_start_key():
             win.close()
             core.quit()
 
-        if any((k in START_KEYS) or ('5' in k) for k in key_names):
+        # Accept any key to continue
+        if key_names:
             return
 
         core.wait(0.01)
@@ -317,14 +321,14 @@ def trigger_led_flash(location):
     return True
 
 
-def play_cue(presentation_type, location_name):
-    """Play the first 100 ms of a cue using the persistent output stream.
+def play_cue(presentation_type, location_name, cue_duration=None):
+    """Play a cue using the persistent output stream.
 
     Args:
-        presentation_type: 'in_situ' or 'ex_situ'
+        presentation_type: 'in_situ', 'ex_situ', or 'loudspeaker'
         location_name: 'near' or 'far'
     """
-    print(f"[AUDIO] Playing cue: {presentation_type} {location_name}")
+    print(f"[AUDIO] Playing cue: {presentation_type} {location_name}, duration: {SOUND_CUE_DURATION}s")
 
     cue_audio, cue_sr = cue_sounds[(presentation_type, location_name)]
     cue_samples = int(round(cue_sr * SOUND_CUE_DURATION))
@@ -458,8 +462,8 @@ def cue_playback_callback(outdata, frame_count, time_info, status):
 
         # Route to appropriate channels based on presentation type
         if presentation_type == 'loudspeaker':
-            # Loudspeaker: channel 1 for near, channel 2 for far
-            channel_idx = 0 if sound_location == 'near' else 1
+            # Loudspeaker: channel 1 for far, channel 2 for near
+            channel_idx = 1 if sound_location == 'far' else 0
             routed[:len(audio_frame), channel_idx:channel_idx+1] = audio_frame[:, 0:1]
         else:
             # In-situ and ex-situ: channels 3-4
@@ -638,22 +642,15 @@ def draw_dot_in_room(elements, distance_label, color='white'):
 
 practice_instructions = visual.TextStim(
     win,
-    text="You will hear a sound, then see a dot.\nPress 2 on the numpad for NEAR and 8 on the numpad for FAR.\nOnly use one finger for the duration of the experiment\n\nPress 5 on the numpad to have a practice.",
+    text="Look towards you left, between the two speakers, at the fixation point. \nYou will hear a sound, then see a light flash.\nPress up if the light is on the far speaker or down if it's the near speaker.\nOnly use one finger for the duration of the experiment\n\nPlease press any key to have a practice.",
     color='white',
     height=30,
     wrapWidth=1000,
     pos=(0, 180)
 )
-practice_image_path = os.path.join(base_dir, 'visual stimuli', 'numpad_pic.png')
-practice_image = visual.ImageStim(
-    win,
-    image=practice_image_path,
-    pos=(0, -120),
-    size=(500, 350)
-)
 instructions = visual.TextStim(
     win,
-    text="practice complete, remember to press the button according to where you see the circle and ignore the sound. please press 5 to start the main experiment, you will not get feedback in the main experiment",
+    text="practice complete, remember to press the button according to where you see the light and ignore the sound. \nRespond as fast as you can. \nTim will now leave the room, then please press any key to start the main experiment, you will not get feedback in the main experiment",
     color='white',
     height=30,
     wrapWidth=1000
@@ -730,16 +727,15 @@ while calibration_active:
 
 # Display practice instructions
 practice_instructions.draw()
-practice_image.draw()
 win.flip()
 wait_for_start_key()
 
 # do 4 practice trials, one from each condition: [in_situ, valid], [in_situ, invalid], [ex_situ, valid], [ex_situ, invalid]
 practice_trials = [
     {'presentation_type': 'in_situ', 'sound_location': 'near', 'dot_location': 'near'},    # in_situ, valid
-    {'presentation_type': 'in_situ', 'sound_location': 'near', 'dot_location': 'far'},     # in_situ, invalid
-    {'presentation_type': 'ex_situ', 'sound_location': 'near', 'dot_location': 'near'},    # ex_situ, valid
-    {'presentation_type': 'ex_situ', 'sound_location': 'near', 'dot_location': 'far'},     # ex_situ, invalid
+    {'presentation_type': 'in_situ', 'sound_location': 'far', 'dot_location': 'far'},     # in_situ, invalid
+    {'presentation_type': 'ex_situ', 'sound_location': 'near', 'dot_location': 'far'},    # ex_situ, valid
+    {'presentation_type': 'ex_situ', 'sound_location': 'far', 'dot_location': 'near'},     # ex_situ, invalid
 ]
 
 random.shuffle(practice_trials)
@@ -750,17 +746,13 @@ for practice_trial in practice_trials:
     dot_location = practice_trial['dot_location']
     validity_condition = determine_validity_condition(sound_location, dot_location)
 
-    # Draw persistent perspective room as background, then fixation on top
-    draw_perspective_room(perspective_elements)
-    fixation.draw()
+    # Display blank screen for 500ms during fixation period
     win.flip()
     core.wait(FIXATION_DURATION)
 
     play_cue(presentation_type, sound_location)
 
-    # Keep the room visible during the cue-to-dot interval
-    draw_perspective_room(perspective_elements)
-    fixation.draw()
+    # Blank screen during the cue-to-dot interval
     win.flip()
     core.wait(CUE_TO_DOT_ISI)
 
@@ -773,11 +765,9 @@ for practice_trial in practice_trials:
     led_flash_start = core.getTime()
     trigger_led_flash(dot_location)
 
-    # Keep showing fixation during LED flash duration
+    # Keep showing blank screen during LED flash duration
     led_flash_end_time = led_flash_start + LED_FLASH_DURATION
     while core.getTime() < led_flash_end_time:
-        draw_perspective_room(perspective_elements)
-        fixation.draw()
         win.flip()
 
         # Check for response during LED flash
@@ -786,9 +776,7 @@ for practice_trial in practice_trials:
 
         core.wait(0.01)  # Small wait to prevent excessive CPU usage
 
-    # After the LED flash, show the room with fixation while waiting for response
-    draw_perspective_room(perspective_elements)
-    fixation.draw()
+    # After the LED flash, show blank screen while waiting for response
     win.flip()
 
     # Wait for response if none was made during LED flash
@@ -800,22 +788,28 @@ for practice_trial in practice_trials:
         core.quit()
 
     correct = response == dot_location
-    feedback = visual.TextStim(
+
+    # Display colored rectangle feedback (half screen)
+    feedback_rect = visual.Rect(
         win,
-        text='Correct!' if correct else 'Incorrect',
-        color='green' if correct else 'red',
-        height=40
+        width=win.size[0],
+        height=win.size[1] // 2,
+        fillColor='green' if correct else 'red',
+        lineColor=None,
+        pos=(0, 0)
     )
-    # Draw feedback over room with fixation
-    draw_perspective_room(perspective_elements)
-    fixation.draw()
-    feedback.draw()
+    feedback_text = visual.TextStim(
+        win,
+        text='Correct' if correct else 'Incorrect',
+        color='black',
+        height=60
+    )
+    feedback_rect.draw()
+    feedback_text.draw()
     win.flip()
     core.wait(0.5)
 
-    # Show room and fixation during inter-trial interval
-    draw_perspective_room(perspective_elements)
-    fixation.draw()
+    # Blank screen during inter-trial interval
     win.flip()
     core.wait(INTER_TRIAL_INTERVAL)
 
@@ -886,7 +880,56 @@ def generate_blocked_trial_list(n_trials):
     return trial_list
 
 
-def generate_balanced_trial_list(n_trials):
+def generate_loudspeaker_trial_list(n_trials, cue_to_dot_isi_values):
+    """
+    Generate loudspeaker-only trials with varying CUE_TO_DOT_ISI across blocks.
+
+    Args:
+        n_trials: Total number of trials (must be divisible by number of blocks)
+        cue_to_dot_isi_values: List of CUE_TO_DOT_ISI values in seconds, one per block
+
+    Returns:
+        List of trial dicts with keys: presentation_type, sound_location, dot_location, cue_to_dot_isi
+    """
+    num_blocks = len(cue_to_dot_isi_values)
+    if n_trials % num_blocks != 0:
+        raise ValueError(f"n_trials ({n_trials}) must be divisible by number of blocks ({num_blocks})")
+
+    trials_per_block = n_trials // num_blocks
+    if trials_per_block % 2 != 0:
+        raise ValueError(f"Each block must have even number of trials for valid/invalid balance, got {trials_per_block}")
+
+    trial_list = []
+
+    for block_idx, cue_to_dot_isi in enumerate(cue_to_dot_isi_values):
+        trials_per_validity = trials_per_block // 2
+
+        # Create conditions: valid and invalid
+        conditions = ['valid'] * trials_per_validity + ['invalid'] * trials_per_validity
+
+        # Shuffle within block
+        random.shuffle(conditions)
+
+        for validity in conditions:
+            # Randomly choose which location pair for sound/dot
+            if random.choice([True, False]):
+                sound_location = 'near'
+                dot_location = 'near' if validity == 'valid' else 'far'
+            else:
+                sound_location = 'far'
+                dot_location = 'far' if validity == 'valid' else 'near'
+
+            trial_list.append({
+                'presentation_type': 'loudspeaker',
+                'sound_location': sound_location,
+                'dot_location': dot_location,
+                'cue_to_dot_isi': cue_to_dot_isi
+            })
+
+    return trial_list
+
+
+
     """
     Generate a balanced trial list with equal numbers of each condition.
 
@@ -967,7 +1010,7 @@ def generate_balanced_trial_list(n_trials):
 
     return trial_list
 
-trials = generate_blocked_trial_list(NUMBER_OF_TRIALS)
+trials = generate_loudspeaker_trial_list(NUMBER_OF_TRIALS, CUE_TO_DOT_ISI_BY_BLOCK)
 
 # Create results dataframe
 results = pd.DataFrame(columns=[
@@ -975,6 +1018,7 @@ results = pd.DataFrame(columns=[
     'presentation_type',
     'sound_location',
     'dot_location',
+    'cue_to_dot_isi',
     'validity_condition',
     'sound_file',
     'response',
@@ -990,24 +1034,21 @@ for trial_num in range(NUMBER_OF_TRIALS):
     presentation_type = trial['presentation_type']
     sound_location = trial['sound_location']
     dot_location = trial['dot_location']
+    cue_to_dot_isi = trial.get('cue_to_dot_isi', CUE_TO_DOT_ISI)
     validity_condition = determine_validity_condition(sound_location, dot_location)
 
-    # Display fixation cross for 500ms overlayed on the perspective room
-    draw_perspective_room(perspective_elements)
-    fixation.draw()
+    # Display blank screen for 500ms during fixation period
     win.flip()
     core.wait(FIXATION_DURATION)
 
-    # Load and play sound cue (only SOUND_CUE_DURATION)
+    # Load and play sound cue
     audio_suffix = AUDIO_FILE_MAPPING[(presentation_type, sound_location)]
     sound_file = f'{AUDIO_FILE_PREFIX}_{audio_suffix}.wav'
     play_cue(presentation_type, sound_location)
 
-    # Cue-to-target ISI - keep room and fixation visible
-    draw_perspective_room(perspective_elements)
-    fixation.draw()
+    # Cue-to-target ISI - blank screen
     win.flip()
-    core.wait(CUE_TO_DOT_ISI)
+    core.wait(cue_to_dot_isi)
 
     # Record response start time before displaying dot
     response_start = core.getTime()
@@ -1020,11 +1061,9 @@ for trial_num in range(NUMBER_OF_TRIALS):
     led_flash_start = core.getTime()
     trigger_led_flash(dot_location)
 
-    # Keep showing fixation during LED flash duration (for consistency with visual timing)
+    # Keep showing blank screen during LED flash duration
     led_flash_end_time = led_flash_start + LED_FLASH_DURATION
     while core.getTime() < led_flash_end_time:
-        draw_perspective_room(perspective_elements)
-        fixation.draw()
         win.flip()
 
         # Check for response during LED flash
@@ -1035,9 +1074,7 @@ for trial_num in range(NUMBER_OF_TRIALS):
 
         core.wait(0.01)  # Small wait to prevent excessive CPU usage
 
-    # After LED flash, show room and fixation, wait for response if none was given
-    draw_perspective_room(perspective_elements)
-    fixation.draw()
+    # After LED flash, show blank screen, wait for response if none was given
     win.flip()
 
     # Wait for arrow key response if none was made during LED flash
@@ -1052,12 +1089,10 @@ for trial_num in range(NUMBER_OF_TRIALS):
 
     correct = response == dot_location if response else False
 
-    # No on-screen feedback; keep timing equivalent to previous feedback period but keep room visible
+    # No on-screen feedback; blank screen during inter-trial interval
     core.wait(0.5)
 
-    # Show room and fixation during inter-trial interval
-    draw_perspective_room(perspective_elements)
-    fixation.draw()
+    # Show blank screen during inter-trial interval
     win.flip()
     core.wait(INTER_TRIAL_INTERVAL)
 
@@ -1067,6 +1102,7 @@ for trial_num in range(NUMBER_OF_TRIALS):
         'presentation_type': presentation_type,
         'sound_location': sound_location,
         'dot_location': dot_location,
+        'cue_to_dot_isi': cue_to_dot_isi,
         'validity_condition': validity_condition,
         'sound_file': sound_file,
         'response': response,
@@ -1117,10 +1153,67 @@ for trial_num in range(NUMBER_OF_TRIALS):
                 break
             core.wait(0.01)
 
+# Calculate mean response times for each condition
+condition_means = {}
+condition_stds = {}
+
+# Determine all unique CUE_TO_DOT_ISI values
+cue_to_dot_isis = sorted(results['cue_to_dot_isi'].dropna().unique())
+
+# Calculate for each combination of presentation_type, validity, and cue_to_dot_isi
+for presentation_type in ['loudspeaker', 'ex_situ', 'in_situ']:
+    for validity in ['Valid', 'Invalid']:
+        for isi_dur in cue_to_dot_isis:
+            condition_mask = (results['presentation_type'] == presentation_type) & \
+                            (results['validity_condition'] == validity) & \
+                            (results['cue_to_dot_isi'] == isi_dur)
+            valid_rts = results.loc[condition_mask, 'response_time'].dropna()
+            if len(valid_rts) > 0:
+                mean_rt = valid_rts.mean()
+                std_rt = valid_rts.std()
+                condition_means[(presentation_type, validity, isi_dur)] = mean_rt
+                condition_stds[(presentation_type, validity, isi_dur)] = std_rt
+                print(f"{presentation_type} {validity} (ISI={isi_dur}s): mean RT = {mean_rt:.4f}s, SD = {std_rt:.4f}s (n={len(valid_rts)})")
+            else:
+                condition_means[(presentation_type, validity, isi_dur)] = np.nan
+                condition_stds[(presentation_type, validity, isi_dur)] = np.nan
+
+# Add condition means and SDs as new columns
+def get_condition_mean(row):
+    key = (row['presentation_type'], row['validity_condition'], row['cue_to_dot_isi'])
+    return condition_means.get(key, np.nan)
+
+def get_condition_std(row):
+    key = (row['presentation_type'], row['validity_condition'], row['cue_to_dot_isi'])
+    return condition_stds.get(key, np.nan)
+
+results['condition_mean_response_time'] = results.apply(get_condition_mean, axis=1)
+results['condition_std_response_time'] = results.apply(get_condition_std, axis=1)
+
 # Save results
 results_file = os.path.join(results_dir, f'{participant_id}_results.csv')
 results.to_csv(results_file, index=False)
 print(f"Results saved to {results_file}")
+
+# Also save a summary of condition means and standard deviations
+summary_data = []
+for presentation_type in ['loudspeaker', 'ex_situ', 'in_situ']:
+    for validity in ['Valid', 'Invalid']:
+        for isi_dur in cue_to_dot_isis:
+            key = (presentation_type, validity, isi_dur)
+            if key in condition_means:
+                summary_data.append({
+                    'presentation_type': presentation_type,
+                    'validity_condition': validity,
+                    'cue_to_dot_isi': isi_dur,
+                    'mean_response_time': condition_means[key],
+                    'std_response_time': condition_stds[key]
+                })
+
+summary_df = pd.DataFrame(summary_data)
+summary_file = os.path.join(results_dir, f'{participant_id}_condition_means.csv')
+summary_df.to_csv(summary_file, index=False)
+print(f"Condition means saved to {summary_file}")
 
 # End screen
 end_text = visual.TextStim(

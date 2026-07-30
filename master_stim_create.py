@@ -370,9 +370,9 @@ def process_folder(
 def build_default_paths(repo_root: Path) -> tuple[Path, Path, Path, Path]:
     experiment_root = repo_root / "experiment_1"
     input_root = experiment_root / "original_audios"
-    loudspeaker_root = experiment_root / "loudspeaker_2"
-    in_situ_root = experiment_root / "in_situ_2"
-    ex_situ_root = experiment_root / "ex_situ_2"
+    loudspeaker_root = experiment_root / "loudspeaker_2707"
+    in_situ_root = experiment_root / "in_situ_2707"
+    ex_situ_root = experiment_root / "ex_situ_2707"
     return input_root, loudspeaker_root, in_situ_root, ex_situ_root
 
 
