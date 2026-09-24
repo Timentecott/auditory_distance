@@ -7,12 +7,31 @@ Convolve the dry stimulus with each RIR and save the resulting localized audio f
 and normalized to -20 dBFS RMS. Prints generated filenames and corresponding RIRs for verification.
 """
 
-import argparse
-import os
 import numpy as np
 import scipy.signal
 import soundfile as sf
 from pathlib import Path
+
+# ============================================================================
+# CONFIGURATION: Edit these variables to change input/output paths and RIRs
+# ============================================================================
+
+# Path to the dry audio stimulus file (.wav)
+STIMULUS_PATH = r"C:\Users\tim_e\source\repos\auditory_distance\experiment_2\audio_stimuli\short_tap.wav"
+
+# Output directory where convolved audio files will be saved
+OUTPUT_DIR = r"C:\Users\tim_e\source\repos\auditory_distance\experiment_2\audio_stimuli\2409_stimuli_localised"
+
+# Dictionary of RIR file paths (.npy)
+# Keys must be: 'in-situ-near', 'in-situ-far', 'ex-situ-near', 'ex-situ-far'
+RIR_PATHS = {
+    'in-situ-near': r"C:\Users\tim_e\source\repos\auditory_distance\experiment_1\resources\insitu_near_2409\RIR.npy",
+    'in-situ-far': r"C:\Users\tim_e\source\repos\auditory_distance\experiment_1\resources\insitu_far_2409\RIR.npy",
+    'ex-situ-near': r"C:\Users\tim_e\source\repos\auditory_distance\experiment_1\resources\exsitu_near_2309\RIR.npy",
+    'ex-situ-far': r"C:\Users\tim_e\source\repos\auditory_distance\experiment_1\resources\exsitu_far_2309\RIR.npy",
+}
+
+# ============================================================================
 
 
 def compute_rms(x: np.ndarray) -> float:
@@ -223,55 +242,6 @@ def localise_with_recorded_rir(stimulus_path, rir_paths_dict, output_dir='record
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Convolve audio stimuli with four RIRs (in-situ-near, in-situ-far, ex-situ-near, ex-situ-far) and save localized audio files."
-    )
-    parser.add_argument(
-        "--input",
-        type=Path,
-        required=True,
-        help="Path to audio file to be localized (.wav)"
-    )
-    parser.add_argument(
-        "--in-situ-near-rir",
-        type=Path,
-        required=True,
-        help="Path to in-situ-near RIR file (.npy)"
-    )
-    parser.add_argument(
-        "--in-situ-far-rir",
-        type=Path,
-        required=True,
-        help="Path to in-situ-far RIR file (.npy)"
-    )
-    parser.add_argument(
-        "--ex-situ-near-rir",
-        type=Path,
-        required=True,
-        help="Path to ex-situ-near RIR file (.npy)"
-    )
-    parser.add_argument(
-        "--ex-situ-far-rir",
-        type=Path,
-        required=True,
-        help="Path to ex-situ-far RIR file (.npy)"
-    )
-    parser.add_argument(
-        "--output",
-        type=Path,
-        default=Path(r"C:\Users\tim_e\source\repos\auditory_distance\experiment_2\audio_stimuli\Localised"),
-        help="Output directory for localized audio files (default: experiment_2/audio_stimuli/Localised)"
-    )
+    # Run the convolution and localization with hard-coded configuration
+    localise_with_recorded_rir(STIMULUS_PATH, RIR_PATHS, output_dir=OUTPUT_DIR)
 
-    args = parser.parse_args()
-
-    # Build the RIR dictionary from command-line arguments
-    rir_dict = {
-        'in-situ-near': args.in_situ_near_rir,
-        'in-situ-far': args.in_situ_far_rir,
-        'ex-situ-near': args.ex_situ_near_rir,
-        'ex-situ-far': args.ex_situ_far_rir
-    }
-
-    # Run the convolution and localization
-    localise_with_recorded_rir(args.input, rir_dict, output_dir=args.output)

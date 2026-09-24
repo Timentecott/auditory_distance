@@ -1,3 +1,9 @@
+#far is red cable (right speaker)
+#set up stimuli - put localised stimuli into 'localised' folder 
+#check line 22 - ISI or stimulus variation? 
+#check audio output
+#check number of trials
+
 from psychopy import visual, event, core
 from psychopy.hardware import keyboard
 import os
@@ -13,23 +19,76 @@ import serial
 import serial.tools.list_ports
 import time
 
+
+def ensure_stereo(audio):
+    """Force audio to stereo (L/R) for headphone playback."""
+    if audio.ndim == 1:
+        return np.column_stack([audio, audio])
+    if audio.shape[1] == 1:
+        return np.column_stack([audio[:, 0], audio[:, 0]])
+    return audio[:, :2]
+
+
+def route_to_asio_channels(audio, presentation_type, sound_location='near'):
+    """Route audio to ASIO channels based on presentation type and location.
+
+    Channels 0-1: Headphones (binaural in-situ/ex-situ)
+    Channels 2-3: Loudspeaker (near/far)
+
+    Args:
+        audio: Audio array (will be converted to appropriate format)
+        presentation_type: 'in_situ', 'ex_situ', or 'loudspeaker'
+        sound_location: 'near' or 'far' (only used for loudspeaker)
+
+    Returns:
+        4-channel ASIO routed audio
+    """
+    routed = np.zeros((audio.shape[0], 4), dtype=np.float32)
+
+    if presentation_type in ['in_situ', 'ex_situ']:
+        # Headphones: stereo on channels 0-1
+        stereo_audio = ensure_stereo(audio)
+        routed[:, 0:2] = stereo_audio[:, :2]
+    elif presentation_type == 'loudspeaker':
+        # Loudspeaker: mono on channel 2 (near) or channel 3 (far)
+        mono_audio = audio[:, 0] if audio.ndim > 1 else audio
+        channel_idx = 3 if sound_location == 'far' else 2
+        routed[:, channel_idx] = mono_audio
+    else:
+        raise ValueError(f"Unknown presentation_type: {presentation_type}")
+
+    return routed
+
+
+# Experiment Design Toggle
+# Set to True to vary ISI across blocks (all loudspeaker)
+# Set to False to vary presentation type across blocks (loudspeaker, in-situ, ex-situ)
+VARY_ISI_BY_BLOCK = False
+
 # Experiment parameters
-NUMBER_OF_TRIALS = 120  # 3 blocks x 12 trials (loudspeaker only with varying CUE_TO_DOT_ISI)
-FIXATION_DURATION = 0.5  # seconds
-SOUND_CUE_DURATION = 0.175  # seconds (constant across all blocks)
-CUE_TO_DOT_ISI = 0.25  # seconds (will be overridden per block)
+NUMBER_OF_TRIALS = 24  # 3 blocks x 12 trials
+FIXATION_DURATION = 0.0  # seconds
+SOUND_CUE_DURATION = 0.6  # seconds - play full audio for 0.6 seconds
+SILENCE_PAD_SECONDS = 0.0  # seconds of silence padding before/after audio (matches stimulus generation)
+SKIP_SILENCE_PAD = False  # Skip the leading silence padding when playing cues
+CUE_TO_DOT_ISI = 0  # seconds - start the cue-to-dot interval 0.3 seconds into audio playback
 LED_FLASH_DURATION = 0.2  # seconds (was DOT_DURATION, now for LED flash)
+LED_SERIAL_LATENCY = 0  # seconds - delay to compensate for Pico serial latency light to sound
 INTER_TRIAL_INTERVAL = 1.5  # seconds
 RESPONSE_TIMEOUT = 3.0  # Maximum time to wait for response in seconds
 
-# CUE_TO_DOT_ISI values for each block
-CUE_TO_DOT_ISI_BY_BLOCK = [0.2, 0.275, 0.35]  # seconds for blocks 1, 2, 3
+# CUE_TO_DOT_ISI values for each block (used only if VARY_ISI_BY_BLOCK=True)
+CUE_TO_DOT_ISI_BY_BLOCK = [0.2, 0.125, 0.05]  # seconds for blocks 1, 2, 3. Note this was 0.2, 0.275, 0.35, changing to 0.2 and down
+
+# Presentation types for each block (used only if VARY_ISI_BY_BLOCK=False)
+PRESENTATION_TYPES_BY_BLOCK = ['loudspeaker', 'in_situ', 'ex_situ']  # for blocks 1, 2, 3
 
 # Raspberry Pi Pico communication parameters
 PICO_BAUD_RATE = 115200
 PICO_TIMEOUT = 2.0  # seconds
 # Set to the ASIO aggregate output device index that exposes 4 output channels.
-# Channels 3-4 are used for headphone playback.
+# Channels 0-1: Headphones (binaural in-situ/ex-situ)
+# Channels 2-3: Loudspeaker (near/far)
 AUDIO_OUTPUT_DEVICE_INDEX = 12
 
 # Presentation types (in situ vs ex situ)
@@ -82,10 +141,10 @@ for (presentation, location), suffix in AUDIO_FILE_MAPPING.items():
     if not os.path.exists(p):
         missing.append(p)
 
-# Verify short_tap.wav exists for loudspeaker
-short_tap_path = os.path.join(audio_stimuli_dir, "short_tap.wav")
-if not os.path.exists(short_tap_path):
-    missing.append(short_tap_path)
+# Verify short_tap_loudspeaker.wav exists for loudspeaker
+loudspeaker_path = os.path.join(audio_dir, f"{AUDIO_FILE_PREFIX}_loudspeaker.wav")
+if not os.path.exists(loudspeaker_path):
+    missing.append(loudspeaker_path)
 
 if missing:
     raise FileNotFoundError(
@@ -331,8 +390,18 @@ def play_cue(presentation_type, location_name, cue_duration=None):
     print(f"[AUDIO] Playing cue: {presentation_type} {location_name}, duration: {SOUND_CUE_DURATION}s")
 
     cue_audio, cue_sr = cue_sounds[(presentation_type, location_name)]
+
+    # Calculate start sample, skipping silence padding if enabled
+    if SKIP_SILENCE_PAD:
+        start_sample = int(round(cue_sr * SILENCE_PAD_SECONDS))
+    else:
+        start_sample = 0
+
     cue_samples = int(round(cue_sr * SOUND_CUE_DURATION))
-    cue_audio = cue_audio[:cue_samples]
+    end_sample = start_sample + cue_samples
+
+    # Extract audio segment, handling the case where we might go past the end
+    cue_audio = cue_audio[start_sample:min(end_sample, cue_audio.shape[0])]
     print(f"[AUDIO] Cue samples: {cue_samples}, audio shape after cut: {cue_audio.shape}")
 
     # If sample rate doesn't match stream sample rate, resample
@@ -418,9 +487,9 @@ short_tap_sr = None
 for presentation in PRESENTATION_TYPES:
     for loc in LOCATIONS:
         if presentation == 'loudspeaker':
-            # Load short_tap.wav once for all loudspeaker trials
+            # Load short_tap_loudspeaker.wav once for all loudspeaker trials
             if short_tap_audio is None:
-                short_tap_path = os.path.join(audio_stimuli_dir, 'short_tap.wav')
+                short_tap_path = os.path.join(audio_dir, f'{AUDIO_FILE_PREFIX}_loudspeaker.wav')
                 short_tap_audio, short_tap_sr = sf.read(short_tap_path, dtype='float32')
                 print(f"Loaded {short_tap_path}: shape={short_tap_audio.shape}, sr={short_tap_sr}Hz")
             cue_sounds[(presentation, loc)] = (short_tap_audio, short_tap_sr)
@@ -430,8 +499,17 @@ for presentation in PRESENTATION_TYPES:
             if not os.path.exists(cue_path):
                 raise FileNotFoundError(f"Missing audio cue file: {cue_path}")
             cue_audio, cue_sr = sf.read(cue_path, dtype='float32')
-            print(f"Loaded {cue_path}: shape={cue_audio.shape}, sr={cue_sr}Hz")
+            print(f"[DEBUG] Raw file load: {cue_path}, shape={cue_audio.shape}, min={np.min(cue_audio):.8f}, max={np.max(cue_audio):.8f}")
+            # Ensure headphone audio is stereo
+            cue_audio = ensure_stereo(cue_audio)
+            print(f"Loaded {cue_path}: shape={cue_audio.shape}, sr={cue_sr}Hz, min={np.min(cue_audio):.8f}, max={np.max(cue_audio):.8f}")
             cue_sounds[(presentation, loc)] = (cue_audio, cue_sr)
+
+# Verify all audio files loaded
+print(f"[DEBUG] Loaded {len(cue_sounds)} audio files:")
+for key in sorted(cue_sounds.keys()):
+    audio, sr = cue_sounds[key]
+    print(f"[DEBUG]   {key}: shape={audio.shape}, sr={sr}Hz, min={np.min(audio):.8f}, max={np.max(audio):.8f}")
 
 
 def cue_playback_callback(outdata, frame_count, time_info, status):
@@ -445,6 +523,11 @@ def cue_playback_callback(outdata, frame_count, time_info, status):
         presentation_type = cue_playback_state.get('presentation_type', 'in_situ')
         sound_location = cue_playback_state.get('sound_location', 'near')
 
+        # DEBUG: Print routing info on first frame of each playback
+        if pos == 0 and audio is not None:
+            print(f"[CALLBACK] Starting playback: presentation_type='{presentation_type}', sound_location='{sound_location}'")
+            print(f"[CALLBACK] Audio shape={audio.shape}, dtype={audio.dtype}, min={np.min(audio):.8f}, max={np.max(audio):.8f}")
+
         if audio is None or pos >= audio_duration:
             outdata[:] = 0
             cue_playback_state['pos'] = pos + frame_count
@@ -453,21 +536,38 @@ def cue_playback_callback(outdata, frame_count, time_info, status):
         end_pos = pos + frame_count
         audio_frame = audio[pos:min(end_pos, audio_duration)]
 
+        # If we got an empty frame, fill with silence
+        if audio_frame.size == 0:
+            outdata[:] = 0
+            cue_playback_state['pos'] = end_pos
+            return
+
+        if pos == 0:
+            print(f"[CALLBACK] First audio_frame: shape={audio_frame.shape}, dtype={audio_frame.dtype}, min={np.min(audio_frame):.8f}, max={np.max(audio_frame):.8f}")
+
+        # Ensure audio_frame is in the correct format (stereo for headphones, can be mono/stereo for loudspeaker)
         if audio_frame.ndim == 1:
             audio_frame = np.column_stack([audio_frame, audio_frame])
-        else:
+        elif audio_frame.ndim > 2:
             audio_frame = audio_frame[:, :2]
 
-        routed = np.zeros((frame_count, 4), dtype=np.float32)
+        if pos == 0:
+            print(f"[CALLBACK] After stereo conversion: shape={audio_frame.shape}, dtype={audio_frame.dtype}, min={np.min(audio_frame):.8f}, max={np.max(audio_frame):.8f}")
 
-        # Route to appropriate channels based on presentation type
-        if presentation_type == 'loudspeaker':
-            # Loudspeaker: channel 1 for far, channel 2 for near
-            channel_idx = 1 if sound_location == 'far' else 0
-            routed[:len(audio_frame), channel_idx:channel_idx+1] = audio_frame[:, 0:1]
-        else:
-            # In-situ and ex-situ: channels 3-4
-            routed[:len(audio_frame), 2:4] = audio_frame
+        # Pad audio frame to match requested frame_count if needed
+        if audio_frame.shape[0] < frame_count:
+            n_channels = audio_frame.shape[1] if audio_frame.ndim > 1 else 1
+            if audio_frame.ndim == 1:
+                audio_frame = audio_frame[:, np.newaxis]
+            padding = np.zeros((frame_count - audio_frame.shape[0], n_channels), dtype=np.float32)
+            audio_frame = np.vstack([audio_frame, padding])
+
+        # Route to ASIO channels
+        routed = route_to_asio_channels(audio_frame, presentation_type, sound_location)
+
+        if pos == 0:
+            max_ch = [np.max(np.abs(routed[:, i])) for i in range(4)]
+            print(f"[ROUTING] {presentation_type} {sound_location}: ch0={max_ch[0]:.4f}, ch1={max_ch[1]:.4f}, ch2={max_ch[2]:.4f}, ch3={max_ch[3]:.4f}")
 
         outdata[:] = routed
         cue_playback_state['pos'] = min(end_pos, audio_duration)
@@ -680,7 +780,28 @@ if not os.path.exists(calibration_audio_path):
     raise FileNotFoundError(f"Calibration audio file not found: {calibration_audio_path}")
 
 calibration_audio, calibration_sr = sf.read(calibration_audio_path, dtype='float32')
-calibration_duration_seconds = len(calibration_audio) / calibration_sr
+print(f"[DEBUG] calibration_audio shape: {calibration_audio.shape}, sr={calibration_sr}")
+
+# Resample to match stream sample rate (44100 Hz)
+if calibration_sr != 44100:
+    ratio = 44100 / calibration_sr
+    n_samples = int(round(calibration_audio.shape[0] * ratio))
+    if calibration_audio.ndim == 1:
+        calibration_audio = signal.resample(calibration_audio, n_samples)
+    else:
+        # Resample each channel
+        resampled = []
+        for ch in range(calibration_audio.shape[1]):
+            resampled.append(signal.resample(calibration_audio[:, ch], n_samples))
+        calibration_audio = np.column_stack(resampled)
+    print(f"[DEBUG] Resampled to 44100 Hz: new shape={calibration_audio.shape}")
+
+# Convert stereo to mono by taking average
+if calibration_audio.ndim > 1 and calibration_audio.shape[1] > 1:
+    calibration_audio = np.mean(calibration_audio, axis=1)
+    print(f"[DEBUG] Converted to mono: shape={calibration_audio.shape}")
+
+calibration_duration_seconds = len(calibration_audio) / 44100
 
 # Display calibration screen and start looping audio
 calibration_active = True
@@ -694,6 +815,8 @@ with cue_state_lock:
     cue_playback_state['audio'] = np.asarray(calibration_audio, dtype=np.float32)
     cue_playback_state['pos'] = 0
     cue_playback_state['audio_duration_samples'] = calibration_audio.shape[0]
+    cue_playback_state['presentation_type'] = 'loudspeaker'
+    cue_playback_state['sound_location'] = 'near'
 
 # Start playing the audio and loop until key press
 while calibration_active:
@@ -710,6 +833,8 @@ while calibration_active:
             cue_playback_state['audio'] = np.asarray(calibration_audio, dtype=np.float32)
             cue_playback_state['pos'] = 0
             cue_playback_state['audio_duration_samples'] = calibration_audio.shape[0]
+            cue_playback_state['presentation_type'] = 'loudspeaker'
+            cue_playback_state['sound_location'] = 'near'
 
     # Check for any key press to stop calibration
     kb_keys = kb.getKeys(waitRelease=False, clear=True)
@@ -732,10 +857,12 @@ wait_for_start_key()
 
 # do 4 practice trials, one from each condition: [in_situ, valid], [in_situ, invalid], [ex_situ, valid], [ex_situ, invalid]
 practice_trials = [
-    {'presentation_type': 'in_situ', 'sound_location': 'near', 'dot_location': 'near'},    # in_situ, valid
-    {'presentation_type': 'in_situ', 'sound_location': 'far', 'dot_location': 'far'},     # in_situ, invalid
-    {'presentation_type': 'ex_situ', 'sound_location': 'near', 'dot_location': 'far'},    # ex_situ, valid
-    {'presentation_type': 'ex_situ', 'sound_location': 'far', 'dot_location': 'near'},     # ex_situ, invalid
+    {'presentation_type': 'loudspeaker', 'sound_location': 'near', 'dot_location': 'near'},    # in_situ, valid
+    {'presentation_type': 'loudspeaker', 'sound_location': 'far', 'dot_location': 'far'},     # in_situ, invalid
+    {'presentation_type': 'loudspeaker', 'sound_location': 'near', 'dot_location': 'far'},    # ex_situ, valid
+    {'presentation_type': 'loudspeaker', 'sound_location': 'far', 'dot_location': 'near'},     # ex_situ, invalid
+    {'presentation_type': 'loudspeaker', 'sound_location': 'near', 'dot_location': 'far'},    # ex_situ, valid
+    {'presentation_type': 'loudspeaker', 'sound_location': 'far', 'dot_location': 'near'},     # ex_situ, invalid
 ]
 
 random.shuffle(practice_trials)
@@ -750,23 +877,26 @@ for practice_trial in practice_trials:
     win.flip()
     core.wait(FIXATION_DURATION)
 
+    # Record the time when audio playback starts
+    play_cue_start = core.getTime()
     play_cue(presentation_type, sound_location)
 
-    # Blank screen during the cue-to-dot interval
+    # Wait for cue-to-dot ISI (sound continues playing in background)
+    # The cue-to-dot interval is measured from when audio started playing
     win.flip()
-    core.wait(CUE_TO_DOT_ISI)
+    while core.getTime() - play_cue_start < CUE_TO_DOT_ISI:
+        core.wait(0.01)
+
+    # Trigger LED flash at target location for practice
+    trigger_led_flash(dot_location)
 
     # Record response start time before displaying dot
     event.clearEvents()
     kb.clearEvents()
     response = None
 
-    # Trigger LED flash at target location for practice - responses can be made during this period
-    led_flash_start = core.getTime()
-    trigger_led_flash(dot_location)
-
-    # Keep showing blank screen during LED flash duration
-    led_flash_end_time = led_flash_start + LED_FLASH_DURATION
+    # Keep showing blank screen during LED flash duration (sound continues)
+    led_flash_end_time = core.getTime() + LED_FLASH_DURATION
     while core.getTime() < led_flash_end_time:
         win.flip()
 
@@ -880,18 +1010,26 @@ def generate_blocked_trial_list(n_trials):
     return trial_list
 
 
-def generate_loudspeaker_trial_list(n_trials, cue_to_dot_isi_values):
+def generate_trial_list(n_trials, vary_isi=True):
     """
-    Generate loudspeaker-only trials with varying CUE_TO_DOT_ISI across blocks.
+    Generate trials with either varying ISI or varying presentation type.
 
     Args:
-        n_trials: Total number of trials (must be divisible by number of blocks)
-        cue_to_dot_isi_values: List of CUE_TO_DOT_ISI values in seconds, one per block
+        n_trials: Total number of trials (must be divisible by 3 for 3 blocks)
+        vary_isi: If True, vary CUE_TO_DOT_ISI across blocks (all loudspeaker).
+                  If False, vary presentation_type across blocks (loudspeaker, in_situ, ex_situ).
 
     Returns:
         List of trial dicts with keys: presentation_type, sound_location, dot_location, cue_to_dot_isi
     """
-    num_blocks = len(cue_to_dot_isi_values)
+    if vary_isi:
+        block_params = CUE_TO_DOT_ISI_BY_BLOCK
+        param_key = 'cue_to_dot_isi'
+    else:
+        block_params = PRESENTATION_TYPES_BY_BLOCK
+        param_key = 'presentation_type'
+
+    num_blocks = len(block_params)
     if n_trials % num_blocks != 0:
         raise ValueError(f"n_trials ({n_trials}) must be divisible by number of blocks ({num_blocks})")
 
@@ -901,7 +1039,7 @@ def generate_loudspeaker_trial_list(n_trials, cue_to_dot_isi_values):
 
     trial_list = []
 
-    for block_idx, cue_to_dot_isi in enumerate(cue_to_dot_isi_values):
+    for block_idx, block_param in enumerate(block_params):
         trials_per_validity = trials_per_block // 2
 
         # Create conditions: valid and invalid
@@ -919,12 +1057,20 @@ def generate_loudspeaker_trial_list(n_trials, cue_to_dot_isi_values):
                 sound_location = 'far'
                 dot_location = 'far' if validity == 'valid' else 'near'
 
-            trial_list.append({
-                'presentation_type': 'loudspeaker',
+            trial_dict = {
                 'sound_location': sound_location,
                 'dot_location': dot_location,
-                'cue_to_dot_isi': cue_to_dot_isi
-            })
+            }
+
+            # Add block-specific parameter
+            if vary_isi:
+                trial_dict['presentation_type'] = 'loudspeaker'
+                trial_dict['cue_to_dot_isi'] = block_param
+            else:
+                trial_dict['presentation_type'] = block_param
+                trial_dict['cue_to_dot_isi'] = CUE_TO_DOT_ISI
+
+            trial_list.append(trial_dict)
 
     return trial_list
 
@@ -1010,7 +1156,17 @@ def generate_loudspeaker_trial_list(n_trials, cue_to_dot_isi_values):
 
     return trial_list
 
-trials = generate_loudspeaker_trial_list(NUMBER_OF_TRIALS, CUE_TO_DOT_ISI_BY_BLOCK)
+# Seed RNG with participant ID for reproducible trial sequences
+random.seed(int(participant_id))
+
+trials = generate_trial_list(NUMBER_OF_TRIALS, vary_isi=VARY_ISI_BY_BLOCK)
+
+# DEBUG: Print first few trials to verify presentation_type
+print("\n[DEBUG] Trial generation verification:")
+print(f"[DEBUG] VARY_ISI_BY_BLOCK = {VARY_ISI_BY_BLOCK}")
+for i, trial in enumerate(trials[:3]):
+    print(f"[DEBUG] Trial {i}: presentation_type='{trial['presentation_type']}', sound_location='{trial['sound_location']}'")
+print()
 
 # Create results dataframe
 results = pd.DataFrame(columns=[
@@ -1041,28 +1197,32 @@ for trial_num in range(NUMBER_OF_TRIALS):
     win.flip()
     core.wait(FIXATION_DURATION)
 
-    # Load and play sound cue
+    # Load and play sound cue (will continue playing in background)
     audio_suffix = AUDIO_FILE_MAPPING[(presentation_type, sound_location)]
     sound_file = f'{AUDIO_FILE_PREFIX}_{audio_suffix}.wav'
+
+    # Record the time when audio playback starts
+    play_cue_start = core.getTime()
     play_cue(presentation_type, sound_location)
 
-    # Cue-to-target ISI - blank screen
+    # Wait for cue-to-dot ISI (sound continues playing in background)
+    # The cue-to-dot interval is measured from when audio started playing
     win.flip()
-    core.wait(cue_to_dot_isi)
+    while core.getTime() - play_cue_start < cue_to_dot_isi:
+        core.wait(0.01)
 
-    # Record response start time before displaying dot
+    # Trigger LED flash at target location
+    trigger_led_flash(dot_location)
+
+    # Record response start time
     response_start = core.getTime()
     event.clearEvents()
     kb.clearEvents()
     response = None
     response_time = None
 
-    # Trigger LED flash at target location - responses can be made during this period
-    led_flash_start = core.getTime()
-    trigger_led_flash(dot_location)
-
-    # Keep showing blank screen during LED flash duration
-    led_flash_end_time = led_flash_start + LED_FLASH_DURATION
+    # Keep showing blank screen during LED flash duration (sound continues)
+    led_flash_end_time = response_start + LED_FLASH_DURATION
     while core.getTime() < led_flash_end_time:
         win.flip()
 
@@ -1157,34 +1317,57 @@ for trial_num in range(NUMBER_OF_TRIALS):
 condition_means = {}
 condition_stds = {}
 
-# Determine all unique CUE_TO_DOT_ISI values
-cue_to_dot_isis = sorted(results['cue_to_dot_isi'].dropna().unique())
+if VARY_ISI_BY_BLOCK:
+    # Analyze by ISI (with constant presentation type: loudspeaker)
+    cue_to_dot_isis = sorted(results['cue_to_dot_isi'].dropna().unique())
 
-# Calculate for each combination of presentation_type, validity, and cue_to_dot_isi
-for presentation_type in ['loudspeaker', 'ex_situ', 'in_situ']:
     for validity in ['Valid', 'Invalid']:
         for isi_dur in cue_to_dot_isis:
-            condition_mask = (results['presentation_type'] == presentation_type) & \
+            condition_mask = (results['presentation_type'] == 'loudspeaker') & \
                             (results['validity_condition'] == validity) & \
                             (results['cue_to_dot_isi'] == isi_dur)
             valid_rts = results.loc[condition_mask, 'response_time'].dropna()
             if len(valid_rts) > 0:
                 mean_rt = valid_rts.mean()
                 std_rt = valid_rts.std()
-                condition_means[(presentation_type, validity, isi_dur)] = mean_rt
-                condition_stds[(presentation_type, validity, isi_dur)] = std_rt
-                print(f"{presentation_type} {validity} (ISI={isi_dur}s): mean RT = {mean_rt:.4f}s, SD = {std_rt:.4f}s (n={len(valid_rts)})")
+                condition_means[('loudspeaker', validity, isi_dur)] = mean_rt
+                condition_stds[('loudspeaker', validity, isi_dur)] = std_rt
+                print(f"loudspeaker {validity} (ISI={isi_dur}s): mean RT = {mean_rt:.4f}s, SD = {std_rt:.4f}s (n={len(valid_rts)})")
             else:
-                condition_means[(presentation_type, validity, isi_dur)] = np.nan
-                condition_stds[(presentation_type, validity, isi_dur)] = np.nan
+                condition_means[('loudspeaker', validity, isi_dur)] = np.nan
+                condition_stds[('loudspeaker', validity, isi_dur)] = np.nan
+else:
+    # Analyze by presentation type (with constant ISI)
+    presentation_types = sorted(results['presentation_type'].dropna().unique())
+
+    for presentation_type in presentation_types:
+        for validity in ['Valid', 'Invalid']:
+            condition_mask = (results['presentation_type'] == presentation_type) & \
+                            (results['validity_condition'] == validity)
+            valid_rts = results.loc[condition_mask, 'response_time'].dropna()
+            if len(valid_rts) > 0:
+                mean_rt = valid_rts.mean()
+                std_rt = valid_rts.std()
+                condition_means[(presentation_type, validity)] = mean_rt
+                condition_stds[(presentation_type, validity)] = std_rt
+                print(f"{presentation_type} {validity}: mean RT = {mean_rt:.4f}s, SD = {std_rt:.4f}s (n={len(valid_rts)})")
+            else:
+                condition_means[(presentation_type, validity)] = np.nan
+                condition_stds[(presentation_type, validity)] = np.nan
 
 # Add condition means and SDs as new columns
 def get_condition_mean(row):
-    key = (row['presentation_type'], row['validity_condition'], row['cue_to_dot_isi'])
+    if VARY_ISI_BY_BLOCK:
+        key = (row['presentation_type'], row['validity_condition'], row['cue_to_dot_isi'])
+    else:
+        key = (row['presentation_type'], row['validity_condition'])
     return condition_means.get(key, np.nan)
 
 def get_condition_std(row):
-    key = (row['presentation_type'], row['validity_condition'], row['cue_to_dot_isi'])
+    if VARY_ISI_BY_BLOCK:
+        key = (row['presentation_type'], row['validity_condition'], row['cue_to_dot_isi'])
+    else:
+        key = (row['presentation_type'], row['validity_condition'])
     return condition_stds.get(key, np.nan)
 
 results['condition_mean_response_time'] = results.apply(get_condition_mean, axis=1)
@@ -1197,15 +1380,32 @@ print(f"Results saved to {results_file}")
 
 # Also save a summary of condition means and standard deviations
 summary_data = []
-for presentation_type in ['loudspeaker', 'ex_situ', 'in_situ']:
+
+if VARY_ISI_BY_BLOCK:
+    # Summary by ISI
+    cue_to_dot_isis = sorted(results['cue_to_dot_isi'].dropna().unique())
     for validity in ['Valid', 'Invalid']:
         for isi_dur in cue_to_dot_isis:
-            key = (presentation_type, validity, isi_dur)
+            key = ('loudspeaker', validity, isi_dur)
+            if key in condition_means:
+                summary_data.append({
+                    'presentation_type': 'loudspeaker',
+                    'validity_condition': validity,
+                    'cue_to_dot_isi': isi_dur,
+                    'mean_response_time': condition_means[key],
+                    'std_response_time': condition_stds[key]
+                })
+else:
+    # Summary by presentation type
+    presentation_types = sorted(results['presentation_type'].dropna().unique())
+    for presentation_type in presentation_types:
+        for validity in ['Valid', 'Invalid']:
+            key = (presentation_type, validity)
             if key in condition_means:
                 summary_data.append({
                     'presentation_type': presentation_type,
                     'validity_condition': validity,
-                    'cue_to_dot_isi': isi_dur,
+                    'cue_to_dot_isi': CUE_TO_DOT_ISI,
                     'mean_response_time': condition_means[key],
                     'std_response_time': condition_stds[key]
                 })

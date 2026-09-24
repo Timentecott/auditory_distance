@@ -25,20 +25,35 @@ from typing import Iterable
 import numpy as np
 import soundfile as sf
 from scipy import signal
+# Get the script's directory
+SCRIPT_DIR = Path(__file__).resolve().parent
+
+# Hardcoded paths (now relative to script location)
+INPUT_FOLDER = SCRIPT_DIR / "original_audios"
+OUTPUT_BASE_FOLDER = SCRIPT_DIR
+IN_SITU_RIR_PATH = SCRIPT_DIR / "resources" / "insitu_near_2409"/ "RIR.npy"
+EX_SITU_RIR_PATH = SCRIPT_DIR / "resources" / "exsitu_near_2309"/ "RIR.npy"
+STIMULUS_SUFFIX = "2409"
+
+DEFAULT_RIR_SR = 44100
 
 AUDIO_EXTENSIONS = {".wav", ".flac", ".ogg", ".aiff", ".aif", ".au", ".mp3"}
 OUTPUT_SAMPLE_RATE = 44100
-DEFAULT_RIR_SR = 44100
+
 LOUDSPEAKER_TARGET_RMS_DBFS = -20.0
 SPATIAL_TARGET_RMS_DBFS = -20.0
 LOUDSPEAKER_TARGET_RMS = 10.0 ** (LOUDSPEAKER_TARGET_RMS_DBFS / 20.0)
 SPATIAL_TARGET_RMS = 10.0 ** (SPATIAL_TARGET_RMS_DBFS / 20.0)
 MAX_PEAK = 0.999
-BANDPASS_LOW_HZ = 800.0
+BANDPASS_LOW_HZ = 100.0
 BANDPASS_HIGH_HZ = 18000.0
 BANDPASS_ORDER = 4
 SILENCE_PAD_SECONDS = 0.1
 CLICK_RAMP_SECONDS = 0.05
+# Processing settings
+PRESERVE_RMS = False  # Change to True if needed
+IR_TAIL_FADE_MS = None  # Change to a value like 150.0 if needed
+RIR_SAMPLE_RATE = DEFAULT_RIR_SR
 
 
 def find_audio_files(path: Path) -> list[Path]:
@@ -367,13 +382,6 @@ def process_folder(
     return processed
 
 
-def build_default_paths(repo_root: Path) -> tuple[Path, Path, Path, Path]:
-    experiment_root = repo_root / "experiment_1"
-    input_root = experiment_root / "original_audios"
-    loudspeaker_root = experiment_root / "loudspeaker_2707"
-    in_situ_root = experiment_root / "in_situ_2707"
-    ex_situ_root = experiment_root / "ex_situ_2707"
-    return input_root, loudspeaker_root, in_situ_root, ex_situ_root
 
 
 def confirm_overwrite_existing_outputs(output_roots: list[Path]) -> bool:
@@ -389,70 +397,17 @@ def confirm_overwrite_existing_outputs(output_roots: list[Path]) -> bool:
     return answer in {"y", "yes"}
 
 
-def main(argv: Iterable[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="Create loudspeaker, in_situ, and ex_situ stimulus folders from dry audio."
-    )
-    parser.add_argument(
-        "--input",
-        type=Path,
-        default=None,
-        help="Input folder containing original audio files (default: experiment_1/original_audios).",
-    )
-    parser.add_argument(
-        "--output-base",
-        type=Path,
-        default=None,
-        help="Base output folder (default: experiment_1).",
-    )
-    parser.add_argument(
-        "--in-situ-rir",
-        type=Path,
-        default=None,
-        help="Path to in_situ RIR/BRIR (.npy or .sofa).",
-    )
-    parser.add_argument(
-        "--ex-situ-rir",
-        type=Path,
-        default=None,
-        help="Path to ex_situ RIR/BRIR (.npy or .sofa).",
-    )
-    parser.add_argument(
-        "--rir-sr",
-        type=int,
-        default=DEFAULT_RIR_SR,
-        help="Sample rate to assume for .npy RIR files (default: 48000).",
-    )
-    parser.add_argument(
-        "--preserve-rms",
-        action="store_true",
-        help="Preserve input RMS after spatial convolution, matching localise_using_single_rir.py's optional mode.",
-    )
-    parser.add_argument(
-        "--ir-tail-fade-ms",
-        type=float,
-        default=None,
-        help="Optional fade-out duration in ms for IR tail to reduce echoiness (e.g., 100-200 ms).",
-    )
-    parser.add_argument(
-        "--overwrite",
-        action="store_true",
-        help="Overwrite existing output files.",
-    )
-    args = parser.parse_args(list(argv) if argv is not None else None)
+def main() -> int:
+    """Main entry point."""
+    input_root = INPUT_FOLDER
+    output_base = OUTPUT_BASE_FOLDER
+    loudspeaker_root = output_base / f"loudspeaker_stimuli_{STIMULUS_SUFFIX}"
+    in_situ_root = output_base / f"in_situ_stimuli_{STIMULUS_SUFFIX}"
+    ex_situ_root = output_base / f"ex_situ_stimuli_{STIMULUS_SUFFIX}"
 
-    repo_root = Path(__file__).resolve().parent
-    default_input_root, default_loudspeaker_root, default_in_situ_root, default_ex_situ_root = build_default_paths(repo_root)
-
-    input_root = args.input or default_input_root
-    output_base = args.output_base or (repo_root / "experiment_1")
-    loudspeaker_root = default_loudspeaker_root if args.output_base is None else output_base / "loudspeaker_stimuli_2906"
-    in_situ_root = default_in_situ_root if args.output_base is None else output_base / "in_situ_stimuli_2906"
-    ex_situ_root = default_ex_situ_root if args.output_base is None else output_base / "ex_situ_stimuli_2906"
-
-    in_situ_rir_path = args.in_situ_rir or (repo_root / "experiment_1" / "resources" / "tim_lab_headphoneRIR.npy")
-    ex_situ_rir_path = args.ex_situ_rir or (repo_root / "experiment_1" / "resources" / "tim_otherlabRIR.npy")
-
+    in_situ_rir_path = IN_SITU_RIR_PATH
+    ex_situ_rir_path = EX_SITU_RIR_PATH
+  
     print("=" * 70)
     print("MASTER STIMULUS CREATION")
     print("=" * 70)
@@ -462,8 +417,8 @@ def main(argv: Iterable[str] | None = None) -> int:
     print(f"Ex-situ output: {ex_situ_root}")
     print(f"In-situ RIR: {in_situ_rir_path}")
     print(f"Ex-situ RIR: {ex_situ_rir_path}")
-    print(f"Spatial RMS preservation: {args.preserve_rms}")
-    print(f"IR tail fade: {args.ir_tail_fade_ms} ms" if args.ir_tail_fade_ms else "IR tail fade: disabled")
+    print(f"Spatial RMS preservation: {PRESERVE_RMS}")
+    print(f"IR tail fade: {IR_TAIL_FADE_MS} ms" if IR_TAIL_FADE_MS else "IR tail fade: disabled")
     print(f"Output sample rate: {OUTPUT_SAMPLE_RATE} Hz")
     print("=" * 70)
 
@@ -476,14 +431,14 @@ def main(argv: Iterable[str] | None = None) -> int:
         print("Cancelled.")
         return 1
 
-    overwrite_outputs = True if args.overwrite or any(path.exists() for path in output_roots) else args.overwrite
+    overwrite_outputs = True if any(path.exists() for path in output_roots) else False
 
     loudspeaker_root.mkdir(parents=True, exist_ok=True)
     in_situ_root.mkdir(parents=True, exist_ok=True)
     ex_situ_root.mkdir(parents=True, exist_ok=True)
 
-    in_situ_rir, in_situ_rir_sr = load_rir_array(in_situ_rir_path, args.rir_sr)
-    ex_situ_rir, ex_situ_rir_sr = load_rir_array(ex_situ_rir_path, args.rir_sr)
+    in_situ_rir, in_situ_rir_sr = load_rir_array(in_situ_rir_path, RIR_SAMPLE_RATE)
+    ex_situ_rir, ex_situ_rir_sr = load_rir_array(ex_situ_rir_path, RIR_SAMPLE_RATE)
 
     print("\nCreating loudspeaker stimuli...")
     loudspeaker_count = process_folder(
@@ -500,8 +455,8 @@ def main(argv: Iterable[str] | None = None) -> int:
         rir=in_situ_rir,
         rir_sr=in_situ_rir_sr,
         overwrite=overwrite_outputs,
-        preserve_rms=args.preserve_rms,
-        ir_tail_fade_ms=args.ir_tail_fade_ms,
+        preserve_rms=PRESERVE_RMS,
+        ir_tail_fade_ms=IR_TAIL_FADE_MS,
     )
 
     print("\nCreating ex_situ stimuli...")
@@ -511,8 +466,8 @@ def main(argv: Iterable[str] | None = None) -> int:
         rir=ex_situ_rir,
         rir_sr=ex_situ_rir_sr,
         overwrite=overwrite_outputs,
-        preserve_rms=args.preserve_rms,
-        ir_tail_fade_ms=args.ir_tail_fade_ms,
+        preserve_rms=PRESERVE_RMS,
+        ir_tail_fade_ms=IR_TAIL_FADE_MS,
     )
 
     print("\n" + "=" * 70)

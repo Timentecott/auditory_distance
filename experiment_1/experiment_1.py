@@ -1,4 +1,8 @@
-#this is the same as pilot experiment but with the perceptual loudness calibration i'm working on
+#Setup- Loudspeaker is line 1 (left), microphone is line 3 and 4. 
+#In focusrite controller check:
+
+#Check **ASIO** output device with check_input_output_index.py and put this in line with "twiddle"
+
 
 from psychopy import visual, event, core
 import pandas as pd
@@ -13,9 +17,9 @@ import soundfile as sf
 
 from pathlib import Path
 import threading
+stimulus_suffix = 2409
 
-
-def ensure_stereo(audio):
+def ensure_stereo(audio): 
     """Force audio to stereo (L/R) for headphone playback."""
     if audio.ndim == 1:
         return np.column_stack([audio, audio])
@@ -30,9 +34,10 @@ def route_to_asio_channels(audio, device_role):
     routed = np.zeros((audio.shape[0], 4), dtype=np.float32)
 
     if device_role in ['in_situ_headphone', 'ex_situ_headphone']:
-        routed[:, 2:4] = audio[:, :2]   # ASIO channels 1-2
+        routed[:, 0:2] = audio[:, :2]   # ASIO channels 1-2        
     elif device_role == 'speaker':
-        routed[:, 1:3] = audio[:, :2]   # ASIO channels 3-4
+        routed[:, 2:4] = audio[:, :2]   # ASIO channels 3-4
+
     else:
         raise ValueError(f"Unknown device_role: {device_role}")
     return routed
@@ -65,8 +70,8 @@ def run_loudness_calibration(win, headphones_device, speakers_device, sample_rat
     """Play loudspeaker continuously, then alternate headphone and loudspeaker sounds every second."""
     from pathlib import Path
 
-    headphone_file = Path(r"C:\Users\tim_e\source\repos\auditory_distance\experiment_1\in_situ_2707\noise\brown_noise_5s.wav")
-    speaker_file = Path(r"C:\Users\tim_e\source\repos\auditory_distance\experiment_1\loudspeaker_2707\noise\brown_noise_5s.wav")
+    headphone_file = Path(r"C:\Users\tim_e\source\repos\auditory_distance\experiment_1\in_situ_stimuli_" + str(stimulus_suffix) + r"\noise\brown_noise_5s.wav")
+    speaker_file = Path(r"C:\Users\tim_e\source\repos\auditory_distance\experiment_1\loudspeaker_stimuli_" + str(stimulus_suffix) + r"\noise\brown_noise_5s.wav")
 
     if headphones_device != speakers_device:
         print(f"Warning: calibration will use device {speakers_device} for both speaker and headphone routing.")
@@ -94,8 +99,10 @@ def run_loudness_calibration(win, headphones_device, speakers_device, sample_rat
         raise ValueError(f"Calibration sample rate {sample_rate} does not match audio file sample rate {headphone_sr}.")
     sample_rate = int(sample_rate)
 
-    one_second = sample_rate
+    one_second = sample_rate 
+    five_seconds = sample_rate * 5
     headphone_segment = route_to_asio_channels(headphone_audio[:one_second], 'in_situ_headphone')
+    speaker_segment_continuous = route_to_asio_channels(speaker_audio[:five_seconds], 'speaker')
     speaker_segment = route_to_asio_channels(speaker_audio[:one_second], 'speaker')
     if headphone_segment.shape[0] == 0 or speaker_segment.shape[0] == 0:
         raise ValueError("Calibration audio files must contain at least one second of audio.")
@@ -121,7 +128,7 @@ def run_loudness_calibration(win, headphones_device, speakers_device, sample_rat
                     state['pos'] = remaining % audio.shape[0]
         return _callback
 
-    speaker_state = make_loop_state(speaker_segment)
+    speaker_state = make_loop_state(speaker_segment_continuous)
     speaker_lock = threading.Lock()
     speaker_text = visual.TextStim(
         win,
@@ -187,9 +194,9 @@ def run_loudness_calibration(win, headphones_device, speakers_device, sample_rat
 
 #load headphone stimuli from /localised_stimuli
 base_dir = os.path.dirname(__file__) if '__file__' in globals() else os.getcwd()
-in_situ_headphone_dir = os.path.join(base_dir, 'in_situ_2707')
-ex_situ_headphone_dir = os.path.join(base_dir, 'ex_situ_2707')
-speaker_dir = os.path.join(base_dir, 'loudspeaker_2707')
+in_situ_headphone_dir = os.path.join(base_dir, f'in_situ_stimuli_{stimulus_suffix}')
+ex_situ_headphone_dir = os.path.join(base_dir, f'ex_situ_stimuli_{stimulus_suffix}')
+speaker_dir = os.path.join(base_dir, f'loudspeaker_stimuli_{stimulus_suffix}')
 _audio_exts = ('*.wav', '*.flac', '*.mp3', '*.aiff', '*.ogg') 
 
 
@@ -695,7 +702,7 @@ individual_eq_file = fetch_individual_eq(participant_id)
 # Show fixation cross and wait for ISI
 fixation = visual.TextStim(win, text='+', color='white', height=50)
 
-# Audio device indices (adjust these)
+# Audio device indices twiddle (adjust these)
 ASIO_AGGREGATE_DEVICE = 12  # ASIO4ALL v2 aggregate: 4 output channels
 ASIO_SPEAKER_MAPPING = [1, 2]
 ASIO_HEADPHONE_MAPPING = [3, 4]
