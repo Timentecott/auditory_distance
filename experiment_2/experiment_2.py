@@ -63,10 +63,10 @@ def route_to_asio_channels(audio, presentation_type, sound_location='near'):
 # Experiment Design Toggle
 # Set to True to vary ISI across blocks (all loudspeaker)
 # Set to False to vary presentation type across blocks (loudspeaker, in-situ, ex-situ)
-VARY_ISI_BY_BLOCK = False
+VARY_ISI_BY_BLOCK = True
 
 # Experiment parameters
-NUMBER_OF_TRIALS = 24  # 3 blocks x 12 trials
+NUMBER_OF_TRIALS = 120  # 3 blocks x 12 trials
 FIXATION_DURATION = 0.0  # seconds
 SOUND_CUE_DURATION = 0.6  # seconds - play full audio for 0.6 seconds
 SILENCE_PAD_SECONDS = 0.0  # seconds of silence padding before/after audio (matches stimulus generation)
@@ -78,7 +78,7 @@ INTER_TRIAL_INTERVAL = 1.5  # seconds
 RESPONSE_TIMEOUT = 3.0  # Maximum time to wait for response in seconds
 
 # CUE_TO_DOT_ISI values for each block (used only if VARY_ISI_BY_BLOCK=True)
-CUE_TO_DOT_ISI_BY_BLOCK = [0.2, 0.125, 0.05]  # seconds for blocks 1, 2, 3. Note this was 0.2, 0.275, 0.35, changing to 0.2 and down
+CUE_TO_DOT_ISI_BY_BLOCK = [0, 0.1, 0.2]  # seconds for blocks 1, 2, 3. Note this was 0.2, 0.275, 0.35, changing to 0.2 and down
 
 # Presentation types for each block (used only if VARY_ISI_BY_BLOCK=False)
 PRESENTATION_TYPES_BY_BLOCK = ['loudspeaker', 'in_situ', 'ex_situ']  # for blocks 1, 2, 3

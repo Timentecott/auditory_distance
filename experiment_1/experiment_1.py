@@ -3,6 +3,7 @@
 
 #Check **ASIO** output device with check_input_output_index.py and put this in line with "twiddle"
 
+#no. of trials. if 126 here and 120 in exp 2 - takes about 22 mins, 14 here and 8 there. 
 
 from psychopy import visual, event, core
 import pandas as pd
@@ -716,7 +717,7 @@ print(f"Using sample rate {sample_rate} Hz for ASIO device {ASIO_AGGREGATE_DEVIC
 practice_trials = 6
 
 # Generate balanced trial list
-number_of_trials = 63 # keep this at 90 for full experiment. multiple of 9
+number_of_trials = 126 # keep this at 90 for full experiment. multiple of 9
 number_of_blocks = 3
 trials_per_block_count = number_of_trials // number_of_blocks
 
