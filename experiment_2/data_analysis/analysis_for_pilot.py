@@ -6,7 +6,7 @@ from scipy import stats
 from statsmodels.stats.anova import AnovaRM
 
 # Define directory path
-pilot_results_dir = r"C:\Users\tim_e\source\repos\auditory_distance\experiment_2\results\pilot_results"
+pilot_results_dir = r"C:\Users\tim_e\source\repos\auditory_distance\experiment_2\results\pilot_2_results"
 
 # Create a list of all CSV files ending with _results.csv
 csv_files = glob.glob(os.path.join(pilot_results_dir, "*_results.csv"))
@@ -48,7 +48,7 @@ for file_path in csv_files:
     participant_results = {'Participant': participant_name}
 
     # Calculate averages and validity effects for each ISI condition
-    for isi_ms in [200, 275, 350]:
+    for isi_ms in [0, 100, 200]:
         # Filter data for this ISI
         isi_data = data_valid[data_valid['isi_ms'] == isi_ms]
 
@@ -103,7 +103,7 @@ print("="*80)
 long_data = []
 for _, row in results_df.iterrows():
     participant = row['Participant']
-    for isi_ms in [200, 275, 350]:
+    for isi_ms in [0, 100, 200]:
         for validity in ['Valid', 'Invalid']:
             validity_lower = validity.lower()
             rt_col = f'avg_{validity_lower}_{isi_ms}'

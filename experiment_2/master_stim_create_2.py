@@ -290,11 +290,45 @@ def add_silence_padding(audio: np.ndarray, sample_rate: int, pad_seconds: float)
     return np.vstack([padding, audio, padding])
 
 
+def add_silence_padding_spatial(audio: np.ndarray, sample_rate: int, pad_seconds: float, leading_pad_reduction: float = 0.1) -> np.ndarray:
+    """Add silence padding for spatial audio with reduced leading silence.
+
+    Args:
+        audio: Audio array to pad
+        sample_rate: Sample rate
+        pad_seconds: Normal padding duration in seconds
+        leading_pad_reduction: Amount to reduce leading silence in seconds (default 0.1s)
+    """
+    audio = np.asarray(audio, dtype=np.float32)
+    pad_samples = int(round(sample_rate * pad_seconds))
+    leading_pad_reduction_samples = int(round(sample_rate * leading_pad_reduction))
+    leading_pad_samples = max(0, pad_samples - leading_pad_reduction_samples)
+
+    if pad_samples <= 0:
+        return audio
+
+    if audio.ndim == 1:
+        leading_padding = np.zeros(leading_pad_samples, dtype=np.float32)
+        trailing_padding = np.zeros(pad_samples, dtype=np.float32)
+        return np.concatenate([leading_padding, audio, trailing_padding])
+
+    leading_padding = np.zeros((leading_pad_samples, audio.shape[1]), dtype=np.float32)
+    trailing_padding = np.zeros((pad_samples, audio.shape[1]), dtype=np.float32)
+    return np.vstack([leading_padding, audio, trailing_padding])
+
+
 def apply_final_stimulus_processing(audio: np.ndarray, sample_rate: int) -> np.ndarray:
     """Apply final processing: bandpass filter, ramps, and silence padding."""
     filtered = apply_bandpass_filter(audio, sample_rate)
     ramped = apply_linear_ramps(filtered, sample_rate, CLICK_RAMP_SECONDS)
     return add_silence_padding(ramped, sample_rate, SILENCE_PAD_SECONDS)
+
+
+def apply_final_stimulus_processing_spatial(audio: np.ndarray, sample_rate: int) -> np.ndarray:
+    """Apply final processing for spatial audio: bandpass filter, ramps, and silence padding with reduced leading silence."""
+    filtered = apply_bandpass_filter(audio, sample_rate)
+    ramped = apply_linear_ramps(filtered, sample_rate, CLICK_RAMP_SECONDS)
+    return add_silence_padding_spatial(ramped, sample_rate, SILENCE_PAD_SECONDS, leading_pad_reduction=0.1)
 
 
 def process_loudspeaker(audio: np.ndarray, sample_rate: int) -> np.ndarray:
@@ -337,10 +371,20 @@ def process_spatial(
     return resample_audio(localized, rir_sr, OUTPUT_SAMPLE_RATE).astype(np.float32)
 
 
-def save_audio(path: Path, audio: np.ndarray, sample_rate: int) -> None:
-    """Apply final processing and save audio to file."""
+def save_audio(path: Path, audio: np.ndarray, sample_rate: int, is_spatial: bool = False) -> None:
+    """Apply final processing and save audio to file.
+
+    Args:
+        path: Output file path
+        audio: Audio array to save
+        sample_rate: Sample rate
+        is_spatial: If True, use spatial processing with reduced leading silence. If False, use standard processing.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    audio = apply_final_stimulus_processing(audio, sample_rate)
+    if is_spatial:
+        audio = apply_final_stimulus_processing_spatial(audio, sample_rate)
+    else:
+        audio = apply_final_stimulus_processing(audio, sample_rate)
     sf.write(str(path), audio, sample_rate)
 
 
@@ -466,7 +510,7 @@ def create_localized_stimuli(
         print(f"Processing {label}...")
         try:
             localized_audio = process_spatial(
-                stimulus,  # Use original stimulus, not padded version
+                stimulus,  # Use original stimulus (no padding) - convolution will expand it to match loudspeaker duration
                 stimulus_sr,
                 rir,
                 rir_sr,
@@ -477,7 +521,7 @@ def create_localized_stimuli(
 
             output_filename = f"{stimulus_name}_{label}.wav"
             output_filepath = output_path / output_filename
-            save_audio(output_filepath, localized_audio, OUTPUT_SAMPLE_RATE)
+            save_audio(output_filepath, localized_audio, OUTPUT_SAMPLE_RATE, is_spatial=True)
             print(f"  Saved: {output_filepath}\n")
 
             results.append({

@@ -63,17 +63,17 @@ def route_to_asio_channels(audio, presentation_type, sound_location='near'):
 # Experiment Design Toggle
 # Set to True to vary ISI across blocks (all loudspeaker)
 # Set to False to vary presentation type across blocks (loudspeaker, in-situ, ex-situ)
-VARY_ISI_BY_BLOCK = True
+VARY_ISI_BY_BLOCK = False
 
 # Experiment parameters
 NUMBER_OF_TRIALS = 120  # 3 blocks x 12 trials
 FIXATION_DURATION = 0.0  # seconds
-SOUND_CUE_DURATION = 0.6  # seconds - play full audio for 0.6 seconds
-SILENCE_PAD_SECONDS = 0.0  # seconds of silence padding before/after audio (matches stimulus generation)
+SOUND_CUE_DURATION = 0.8  # seconds - play full audio for 0.6 seconds
+SILENCE_PAD_SECONDS = 0  # seconds of silence padding before/after audio (matches stimulus generation)
 SKIP_SILENCE_PAD = False  # Skip the leading silence padding when playing cues
-CUE_TO_DOT_ISI = 0  # seconds - start the cue-to-dot interval 0.3 seconds into audio playback
+CUE_TO_DOT_ISI = 0.1  # seconds - start the cue-to-dot interval 0.3 seconds into audio playback
 LED_FLASH_DURATION = 0.2  # seconds (was DOT_DURATION, now for LED flash)
-LED_SERIAL_LATENCY = 0  # seconds - delay to compensate for Pico serial latency light to sound
+LED_SERIAL_LATENCY = 2  # seconds - delay to compensate for Pico serial latency light to sound
 INTER_TRIAL_INTERVAL = 1.5  # seconds
 RESPONSE_TIMEOUT = 3.0  # Maximum time to wait for response in seconds
 
@@ -417,12 +417,18 @@ def play_cue(presentation_type, location_name, cue_duration=None):
             cue_audio = np.column_stack(resampled)
 
     with cue_state_lock:
-        cue_playback_state['audio'] = np.asarray(cue_audio, dtype=np.float32)
+        # IMPORTANT: Use .copy() to ensure we have our own data, not a view
+        # The stream callback runs continuously and may invalidate views
+        cue_playback_state['audio'] = np.asarray(cue_audio, dtype=np.float32).copy()
         cue_playback_state['pos'] = 0
         cue_playback_state['audio_duration_samples'] = cue_audio.shape[0]
         cue_playback_state['presentation_type'] = presentation_type
         cue_playback_state['sound_location'] = location_name
+        # DIAGNOSTIC: Verify audio was stored correctly
+        stored_audio = cue_playback_state['audio']
         print(f"[AUDIO] Set playback state: duration={cue_audio.shape[0]}, audio_min={np.min(cue_audio)}, audio_max={np.max(cue_audio)}")
+        print(f"[AUDIO] Verified stored: stored_shape={stored_audio.shape}, stored_min={np.min(stored_audio)}, stored_max={np.max(stored_audio)}")
+        print(f"[AUDIO] First 10 samples stored: {stored_audio[:10]}")
 
     while True:
         with cue_state_lock:
@@ -535,6 +541,11 @@ def cue_playback_callback(outdata, frame_count, time_info, status):
 
         end_pos = pos + frame_count
         audio_frame = audio[pos:min(end_pos, audio_duration)]
+
+        # DIAGNOSTIC: Check what we actually got
+        if pos == 0:
+            print(f"[CALLBACK] Extracting audio[{pos}:{min(end_pos, audio_duration)}]")
+            print(f"[CALLBACK] audio array id={id(audio)}, audio[0:10]={audio[0:10] if len(audio) > 0 else 'EMPTY'}")
 
         # If we got an empty frame, fill with silence
         if audio_frame.size == 0:
@@ -1029,6 +1040,10 @@ def generate_trial_list(n_trials, vary_isi=True):
         block_params = PRESENTATION_TYPES_BY_BLOCK
         param_key = 'presentation_type'
 
+    # Randomize block order based on participant ID (RNG already seeded)
+    block_params = list(block_params)  # Create mutable copy
+    random.shuffle(block_params)
+
     num_blocks = len(block_params)
     if n_trials % num_blocks != 0:
         raise ValueError(f"n_trials ({n_trials}) must be divisible by number of blocks ({num_blocks})")
@@ -1161,9 +1176,10 @@ random.seed(int(participant_id))
 
 trials = generate_trial_list(NUMBER_OF_TRIALS, vary_isi=VARY_ISI_BY_BLOCK)
 
-# DEBUG: Print first few trials to verify presentation_type
+# DEBUG: Print first few trials to verify presentation_type and block order
 print("\n[DEBUG] Trial generation verification:")
 print(f"[DEBUG] VARY_ISI_BY_BLOCK = {VARY_ISI_BY_BLOCK}")
+print(f"[DEBUG] Block order randomized by participant ID: {participant_id}")
 for i, trial in enumerate(trials[:3]):
     print(f"[DEBUG] Trial {i}: presentation_type='{trial['presentation_type']}', sound_location='{trial['sound_location']}'")
 print()

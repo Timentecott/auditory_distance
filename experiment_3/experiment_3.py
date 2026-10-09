@@ -104,74 +104,130 @@ while True:
         break
     core.wait(0.05)
 
+# Set random seed based on participant number for reproducibility
+np.random.seed(int(participant_num))
+
 # Create results directory
 results_dir = os.path.join(os.path.dirname(__file__), 'results')
 os.makedirs(results_dir, exist_ok=True)
 
 # Audio setup
 stimuli_dir = os.path.join(os.path.dirname(__file__), 'stimuli')
+experiment_dir = os.path.dirname(__file__)
 
-# Preload audio files for different presentation types
-# Supports: in_situ, ex_situ, loudspeaker (with near/far for loudspeaker)
-audio_files = {
-    ('in_situ', 'near'): os.path.join(stimuli_dir, 'in_situ_near.wav'),
-    ('in_situ', 'far'): os.path.join(stimuli_dir, 'in_situ_far.wav'),
-    ('ex_situ', 'near'): os.path.join(stimuli_dir, 'ex_situ_near.wav'),
-    ('ex_situ', 'far'): os.path.join(stimuli_dir, 'ex_situ_far.wav'),
-    ('loudspeaker', 'near'): os.path.join(stimuli_dir, 'loudspeaker_near.wav'),
-    ('loudspeaker', 'far'): os.path.join(stimuli_dir, 'loudspeaker_far.wav'),
-}
+# Load conditions from CSV
+conditions_file = os.path.join(experiment_dir, 'conditions.csv')
+if not os.path.exists(conditions_file):
+    raise FileNotFoundError(f"Conditions file not found: {conditions_file}")
 
-# Load all audio files
+conditions_df = pd.read_csv(conditions_file)
+
+# Load all audio files referenced in the conditions
 audio_data = {}
 fs = None
 
-for (presentation_type, location), audio_file in audio_files.items():
-    if os.path.exists(audio_file):
-        audio, sr = sf.read(audio_file, dtype='float32')
-        # Ensure stereo for headphone playback
-        if presentation_type in ['in_situ', 'ex_situ']:
-            audio = ensure_stereo(audio)
-        audio_data[(presentation_type, location)] = np.asarray(audio, dtype=np.float32)
+for idx, row in conditions_df.iterrows():
+    odd_file_path = os.path.join(experiment_dir, row['odd_file'])
+    control_file_path = os.path.join(experiment_dir, row['control_file'])
+
+    # Load odd file
+    odd_key = f"trial_{row['trial_number']}_odd"
+    if os.path.exists(odd_file_path):
+        audio, sr = sf.read(odd_file_path, dtype='float32')
+        audio = ensure_stereo(audio)
+        audio_data[odd_key] = np.asarray(audio, dtype=np.float32)
         if fs is None:
             fs = sr
-        elif fs != sr:
-            print(f"Warning: Sample rate mismatch for {audio_file}: expected {fs}Hz, got {sr}Hz")
     else:
-        print(f"Warning: Audio file not found: {audio_file}")
+        print(f"Warning: Odd audio file not found: {odd_file_path}")
 
-# Fallback to single brown_noise file if specific files don't exist
+    # Load control file
+    control_key = f"trial_{row['trial_number']}_control"
+    if os.path.exists(control_file_path):
+        audio, sr = sf.read(control_file_path, dtype='float32')
+        audio = ensure_stereo(audio)
+        audio_data[control_key] = np.asarray(audio, dtype=np.float32)
+        if fs is None:
+            fs = sr
+    else:
+        print(f"Warning: Control audio file not found: {control_file_path}")
+
 if not audio_data:
-    print("Loading fallback brown_noise_5s.wav...")
-    fallback_file = os.path.join(stimuli_dir, 'brown_noise_5s.wav')
-    if os.path.exists(fallback_file):
-        audio, fs = sf.read(fallback_file, dtype='float32')
-        audio_stereo = ensure_stereo(audio)
-        # Use same audio for all presentation types
-        for (presentation_type, location) in audio_files.keys():
-            audio_data[(presentation_type, location)] = audio_stereo
-    else:
-        raise FileNotFoundError(f"No audio files found in {stimuli_dir}")
+    raise FileNotFoundError(f"No audio files loaded from conditions")
 
-# Trial configuration for testing: 1 practice and 1 main trial
-# Both with correct answer = 3
-# question_type: 'congruent', 'incongruent', or 'outlier'
-# variable_type: 'loudness', 'quietness', 'closeness', 'farness'
-# presentation_type: 'in_situ', 'ex_situ', or 'loudspeaker'
-# sound_location: 'near' or 'far'
-trial_list = [
-    # (trial_number, trial_type, question_type, variable_type, correct_answer, presentation_type, sound_location)
-    (1, 'practice', 'outlier', 'farness', 3, 'loudspeaker', 'far'),
-    (2, 'main', 'congruent', 'farness', 3, 'in_situ', 'near'),
-]
+# Convert conditions CSV to trial_list format
+trial_list = []
+for idx, row in conditions_df.iterrows():
+    trial_list.append((
+        int(row['trial_number']),
+        row['trial_type'],
+        row['condition'],
+        row['playback_type']
+    ))
 
 results_data = []
 all_sounds_heard = False
+
+def get_odd_position_for_trial(trial_number):
+    """Determine the odd sound position (1, 2, or 3) for a trial using seeded RNG.
+
+    Args:
+        trial_number: The trial number (used to generate unique random position per trial)
+
+    Returns:
+        Odd sound position (1, 2, or 3)
+    """
+    # Create a fresh random state for this trial to ensure reproducibility
+    # while allowing different positions for different trials
+    rng = np.random.RandomState(int(participant_num) + trial_number)
+    return rng.randint(1, 4)
+
+def route_playback(audio, playback_type, is_odd_sound):
+    """Route audio to ASIO channels based on playback_type.
+
+    Args:
+        audio: Audio array (stereo)
+        playback_type: 'Always headphone', 'Always loudspeaker', 'Mix (odd headphone)', 'Mix (odd loudspeaker)'
+        is_odd_sound: Boolean indicating if this is the odd sound
+
+    Returns:
+        4-channel ASIO routed audio
+    """
+    routed = np.zeros((audio.shape[0], 4), dtype=np.float32)
+    stereo_audio = ensure_stereo(audio)
+    mono_audio = audio[:, 0] if audio.ndim > 1 else audio
+
+    # Normalize playback_type for case-insensitive comparison
+    playback_type_lower = playback_type.lower()
+
+    if playback_type_lower == 'always headphone':
+        # All sounds to headphone (channels 0-1)
+        routed[:, 0:2] = stereo_audio[:, :2]
+    elif playback_type_lower == 'always loudspeaker':
+        # All sounds to loudspeaker (channel 2)
+        routed[:, 2] = mono_audio
+    elif playback_type_lower == 'mix (odd headphone)':
+        # Odd to headphone, others to loudspeaker
+        if is_odd_sound:
+            routed[:, 0:2] = stereo_audio[:, :2]
+        else:
+            routed[:, 2] = mono_audio
+    elif playback_type_lower == 'mix (odd loudspeaker)':
+        # Odd to loudspeaker, others to headphone
+        if is_odd_sound:
+            routed[:, 2] = mono_audio
+        else:
+            routed[:, 0:2] = stereo_audio[:, :2]
+    else:
+        raise ValueError(f"Unknown playback_type: {playback_type}")
+
+    return routed
+
 trial_playback_state = {
     'audio': None, 
     'pos': 0,
-    'presentation_type': 'in_situ',
-    'sound_location': 'near'
+    'playback_type': 'Always loudspeaker',
+    'is_odd_sound': False
 }
 trial_state_lock = threading.Lock()
 
@@ -188,21 +244,21 @@ def trial_playback_callback(outdata, frame_count, time_info, status):
 
         audio = trial_playback_state['audio']
         pos = trial_playback_state['pos']
-        presentation_type = trial_playback_state.get('presentation_type', 'in_situ')
-        sound_location = trial_playback_state.get('sound_location', 'near')
+        playback_type = trial_playback_state.get('playback_type', 'Always loudspeaker')
+        is_odd_sound = trial_playback_state.get('is_odd_sound', False)
         end_pos = pos + frame_count
 
         if end_pos <= audio.shape[0]:
-            # Route audio through ASIO channels based on presentation type
+            # Route audio through ASIO channels based on playback type
             audio_frame = audio[pos:end_pos]
-            routed = route_to_asio_channels(audio_frame, presentation_type, sound_location)
+            routed = route_playback(audio_frame, playback_type, is_odd_sound)
             outdata[:] = routed
             trial_playback_state['pos'] = end_pos
         else:
             remaining = audio.shape[0] - pos
             if remaining > 0:
                 audio_frame = audio[pos:]
-                routed = route_to_asio_channels(audio_frame, presentation_type, sound_location)
+                routed = route_playback(audio_frame, playback_type, is_odd_sound)
                 # Pad with silence to match frame_count
                 padding = np.zeros((frame_count - remaining, 4), dtype=np.float32)
                 outdata[:remaining] = routed
@@ -226,8 +282,8 @@ stream.start()
 practice_instructions = visual.TextStim(
     win,
     text="PRACTICE TRIAL\n\n"
-         "Click the buttons to hear sounds.\n"
-         "After listening to all sounds, press the corresponding number (1, 2, or 3)\n"
+         "Press 1, 2, or 3 to hear the sounds.\n"
+         "After listening to all sounds, click the boxes below\n"
          "to indicate which sound is the odd one out.\n\n"
          "You will receive feedback on your answer.",
     color='white',
@@ -242,8 +298,8 @@ event.waitKeys()
 main_instructions = visual.TextStim(
     win,
     text="MAIN TRIALS\n\n"
-         "For the following trials, click the buttons to hear sounds.\n"
-         "After listening to all sounds, press the corresponding number (1, 2, or 3)\n"
+         "Press 1, 2, or 3 to hear the sounds.\n"
+         "After listening to all sounds, click the boxes below\n"
          "to indicate your answer.\n\n"
          "No feedback will be provided.",
     color='white',
@@ -252,12 +308,19 @@ main_instructions = visual.TextStim(
 )
 
 # Run trials
-for trial_num, trial_type, question_type, variable_type, correct_answer, presentation_type, sound_location in trial_list:
+for trial_num, trial_type, condition, playback_type in trial_list:
     if trial_num == 2:
         # Show main instructions before first main trial
         main_instructions.draw()
         win.flip()
         event.waitKeys()
+
+    # Determine odd sound position for this trial using seeded RNG
+    correct_answer = get_odd_position_for_trial(trial_num)
+
+    # Get the audio duration for progress bar
+    odd_key = f"trial_{trial_num}_odd"
+    audio_duration = audio_data[odd_key].shape[0] / fs if odd_key in audio_data else 5.0
 
     sounds_heard = set()  # Track which sounds (1, 2, 3) have been played
     trial_response = None
@@ -267,66 +330,57 @@ for trial_num, trial_type, question_type, variable_type, correct_answer, present
     showing_warning = False
     selected_option = None  # Track selected option: 'A', 'B', or 'C'
     follow_up_response = None  # Track follow-up question response
-    difference_options = ['Quieter', 'Louder', 'Closer', 'Further', 'More Realistic', 'Less Realistic']
+    # Note: follow-up options are separate and only have Closer/Further
 
     while trial_response is None:
-        # Determine instruction text based on question_type and variable_type
-        if question_type == 'outlier':
-            instruction_text = "Which is the odd one out?"
-        elif question_type == 'congruent':
-            # Question matches the variable
-            if variable_type == 'loudness':
-                instruction_text = "Which is the loudest?"
-            elif variable_type == 'quietness':
-                instruction_text = "Which is the quietest?"
-            elif variable_type == 'closeness':
-                instruction_text = "Which is the closest?"
-            elif variable_type == 'farness':
-                instruction_text = "Which is the furthest?"
-        elif question_type == 'incongruent':
-            # Question doesn't match the variable
-            if variable_type == 'closeness':
-                instruction_text = "Which is the loudest?"
-            elif variable_type == 'farness':
-                instruction_text = "Which is the quietest?"
-            elif variable_type == 'loudness':
-                instruction_text = "Which is the closest?"
-            elif variable_type == 'quietness':
-                instruction_text = "Which is the furthest?"
+        # Question is always "Which is the odd one out?"
+        instruction_text = "Which is the odd one out?"
 
-        # Create audio playback buttons (numbered 1, 2, 3)
-        # Positioned to be visible and well-centered
-        button_1 = visual.Rect(
+        # Progress bar for audio playback
+        playback_progress = 0.0
+        if trial_playback_state['audio'] is not None:
+            playback_progress = min(1.0, trial_playback_state['pos'] / trial_playback_state['audio'].shape[0])
+
+        # Create keyboard press instructions
+        keyboard_instruction = visual.TextStim(
             win,
-            width=120,
-            height=120,
-            pos=(-200, 180),
-            fillColor=[0.2, 0.4, 0.6],  # Nice blue
-            lineColor='white',
-            lineWidth=2
-        )
-        button_2 = visual.Rect(
-            win,
-            width=120,
-            height=120,
-            pos=(0, 180),
-            fillColor=[0.2, 0.4, 0.6],
-            lineColor='white',
-            lineWidth=2
-        )
-        button_3 = visual.Rect(
-            win,
-            width=120,
-            height=120,
-            pos=(200, 180),
-            fillColor=[0.2, 0.4, 0.6],
-            lineColor='white',
-            lineWidth=2
+            text="Press 1, 2, or 3 to hear sounds",
+            color=[0.7, 0.7, 0.7],
+            height=25,
+            pos=(0, 250),
+            wrapWidth=1200
         )
 
-        label_1 = visual.TextStim(win, text='1', color='white', height=50, pos=(-200, 180), bold=True)
-        label_2 = visual.TextStim(win, text='2', color='white', height=50, pos=(0, 180), bold=True)
-        label_3 = visual.TextStim(win, text='3', color='white', height=50, pos=(200, 180), bold=True)
+        # Progress bar visualization
+        progress_bar_bg = visual.Rect(
+            win,
+            width=600,
+            height=20,
+            pos=(0, 200),
+            fillColor=[0.15, 0.15, 0.15],
+            lineColor=[0.4, 0.4, 0.4],
+            lineWidth=1
+        )
+
+        progress_bar_fill = visual.Rect(
+            win,
+            width=600 * playback_progress,
+            height=20,
+            pos=(-300 + 300 * playback_progress, 200),
+            fillColor=[0.3, 0.6, 0.9],
+            lineColor=[0.3, 0.6, 0.9],
+            lineWidth=0
+        )
+
+        # Sound labels (1, 2, 3) - not clickable, just labels
+        label_1 = visual.TextStim(win, text='1', color='white', height=30, pos=(-200, 100), bold=True)
+        label_2 = visual.TextStim(win, text='2', color='white', height=30, pos=(0, 100), bold=True)
+        label_3 = visual.TextStim(win, text='3', color='white', height=30, pos=(200, 100), bold=True)
+
+        # Show which sounds have been heard
+        status_1 = visual.TextStim(win, text='✓' if 1 in sounds_heard else '○', color='green' if 1 in sounds_heard else [0.5, 0.5, 0.5], height=20, pos=(-200, 60), bold=True)
+        status_2 = visual.TextStim(win, text='✓' if 2 in sounds_heard else '○', color='green' if 2 in sounds_heard else [0.5, 0.5, 0.5], height=20, pos=(0, 60), bold=True)
+        status_3 = visual.TextStim(win, text='✓' if 3 in sounds_heard else '○', color='green' if 3 in sounds_heard else [0.5, 0.5, 0.5], height=20, pos=(200, 60), bold=True)
 
         # Question/instruction - large and prominent, centered
         instruction = visual.TextStim(
@@ -339,7 +393,7 @@ for trial_num, trial_type, question_type, variable_type, correct_answer, present
             bold=True
         )
 
-        # Create response selection boxes aligned with top buttons
+        # Create response selection boxes aligned with buttons
         response_box_a = visual.Rect(
             win,
             width=100,
@@ -394,7 +448,7 @@ for trial_num, trial_type, question_type, variable_type, correct_answer, present
             bold=True
         )
 
-        prompt_text = "Click to hear sounds"
+        prompt_text = "Press keys 1, 2, or 3 to hear sounds"
         if not all_sounds_heard:
             prompt_text += f" ({len(sounds_heard)}/3 heard)"
 
@@ -450,36 +504,18 @@ for trial_num, trial_type, question_type, variable_type, correct_answer, present
             wrapWidth=1200
         )
 
-        # Check for mouse clicks on buttons
-        mouse = event.Mouse()
+        # Draw everything
+        keyboard_instruction.draw()
+        progress_bar_bg.draw()
+        progress_bar_fill.draw()
 
-        # Detect mouse position for hover effects
-        mouse_pos = mouse.getPos()
-
-        # Draw everything in order
-        # Draw containers first
-        play_button_section.draw()
-        question_section.draw()
-        response_section.draw()
-
-        # Draw text/buttons on top
-        prompt.draw()
-
-        # Draw play buttons with hover effect
-        button_1_hover = mouse.isPressedIn(button_1) or (abs(mouse_pos[0] - (-200)) < 60 and abs(mouse_pos[1] - 350) < 60)
-        button_2_hover = mouse.isPressedIn(button_2) or (abs(mouse_pos[0] - 0) < 60 and abs(mouse_pos[1] - 350) < 60)
-        button_3_hover = mouse.isPressedIn(button_3) or (abs(mouse_pos[0] - 200) < 60 and abs(mouse_pos[1] - 350) < 60)
-
-        button_1.fillColor = [0.25, 0.5, 0.7] if button_1_hover else [0.2, 0.4, 0.6]
-        button_2.fillColor = [0.25, 0.5, 0.7] if button_2_hover else [0.2, 0.4, 0.6]
-        button_3.fillColor = [0.25, 0.5, 0.7] if button_3_hover else [0.2, 0.4, 0.6]
-
-        button_1.draw()
-        button_2.draw()
-        button_3.draw()
         label_1.draw()
         label_2.draw()
         label_3.draw()
+
+        status_1.draw()
+        status_2.draw()
+        status_3.draw()
 
         # Draw question
         instruction.draw()
@@ -508,37 +544,43 @@ for trial_num, trial_type, question_type, variable_type, correct_answer, present
                 showing_warning = False
                 warning_start_time = None
 
-        # Check for mouse clicks on audio playback buttons
-        if mouse.isPressedIn(button_1):
-            with trial_state_lock:
-                audio_key = (presentation_type, sound_location)
-                if audio_key in audio_data:
-                    trial_playback_state['audio'] = audio_data[audio_key].astype(np.float32)
-                    trial_playback_state['pos'] = 0
-                    trial_playback_state['presentation_type'] = presentation_type
-                    trial_playback_state['sound_location'] = sound_location
-            sounds_heard.add(1)
-        elif mouse.isPressedIn(button_2):
-            with trial_state_lock:
-                audio_key = (presentation_type, sound_location)
-                if audio_key in audio_data:
-                    trial_playback_state['audio'] = audio_data[audio_key].astype(np.float32)
-                    trial_playback_state['pos'] = 0
-                    trial_playback_state['presentation_type'] = presentation_type
-                    trial_playback_state['sound_location'] = sound_location
-            sounds_heard.add(2)
-        elif mouse.isPressedIn(button_3):
-            with trial_state_lock:
-                audio_key = (presentation_type, sound_location)
-                if audio_key in audio_data:
-                    trial_playback_state['audio'] = audio_data[audio_key].astype(np.float32)
-                    trial_playback_state['pos'] = 0
-                    trial_playback_state['presentation_type'] = presentation_type
-                    trial_playback_state['sound_location'] = sound_location
-            sounds_heard.add(3)
+        # Check for keyboard presses (1, 2, 3) to play sounds
+        keys = event.getKeys()
+        for key in keys:
+            if key == '1':
+                with trial_state_lock:
+                    is_odd = (1 == correct_answer)
+                    audio_key = f"trial_{trial_num}_{'odd' if is_odd else 'control'}"
+                    if audio_key in audio_data:
+                        trial_playback_state['audio'] = audio_data[audio_key].astype(np.float32)
+                        trial_playback_state['pos'] = 0
+                        trial_playback_state['playback_type'] = playback_type
+                        trial_playback_state['is_odd_sound'] = is_odd
+                sounds_heard.add(1)
+            elif key == '2':
+                with trial_state_lock:
+                    is_odd = (2 == correct_answer)
+                    audio_key = f"trial_{trial_num}_{'odd' if is_odd else 'control'}"
+                    if audio_key in audio_data:
+                        trial_playback_state['audio'] = audio_data[audio_key].astype(np.float32)
+                        trial_playback_state['pos'] = 0
+                        trial_playback_state['playback_type'] = playback_type
+                        trial_playback_state['is_odd_sound'] = is_odd
+                sounds_heard.add(2)
+            elif key == '3':
+                with trial_state_lock:
+                    is_odd = (3 == correct_answer)
+                    audio_key = f"trial_{trial_num}_{'odd' if is_odd else 'control'}"
+                    if audio_key in audio_data:
+                        trial_playback_state['audio'] = audio_data[audio_key].astype(np.float32)
+                        trial_playback_state['pos'] = 0
+                        trial_playback_state['playback_type'] = playback_type
+                        trial_playback_state['is_odd_sound'] = is_odd
+                sounds_heard.add(3)
 
         # Check for mouse clicks on response selection boxes
-        elif mouse.isPressedIn(response_box_a):
+        mouse = event.Mouse()
+        if mouse.isPressedIn(response_box_a):
             selected_option = 'A'
         elif mouse.isPressedIn(response_box_b):
             selected_option = 'B'
@@ -551,6 +593,10 @@ for trial_num, trial_type, question_type, variable_type, correct_answer, present
             response_map = {'A': 1, 'B': 2, 'C': 3}
             trial_response = response_map[selected_option]
             trial_rt = time.time() - trial_start_time
+            # Stop audio playback
+            with trial_state_lock:
+                trial_playback_state['audio'] = None
+                trial_playback_state['pos'] = 0
 
         win.flip()
         core.wait(0.05)
@@ -582,6 +628,11 @@ for trial_num, trial_type, question_type, variable_type, correct_answer, present
     # Follow-up question: Ask how the chosen sound was different
     follow_up_response = None
     selected_difference = None
+    # For practice trials, add a third option "They're completely different!"
+    if trial_type == 'practice':
+        followup_difference_options = ['Closer', 'Further', "They're completely different!"]
+    else:
+        followup_difference_options = ['Closer', 'Further']
 
     while follow_up_response is None:
         # Create follow-up question text
@@ -595,17 +646,30 @@ for trial_num, trial_type, question_type, variable_type, correct_answer, present
             bold=True
         )
 
-        # Create option boxes in two rows (3 per row)
+        replay_instruction = visual.TextStim(
+            win,
+            text="Press 1, 2, or 3 to hear sounds again:",
+            color=[0.9, 0.9, 0.9],
+            height=20,
+            pos=(0, 250),
+            wrapWidth=1200
+        )
+
+        # Create option boxes
         mouse = event.Mouse()
-        option_positions = [
-            (-250, 150), (0, 150), (250, 150),  # Top row
-            (-250, 50), (0, 50), (250, 50)      # Bottom row
-        ]
+        if trial_type == 'practice':
+            option_positions = [
+                (-200, 100), (0, 100), (200, 100)  # Three options for practice
+            ]
+        else:
+            option_positions = [
+                (-100, 100), (100, 100)  # Two options for main
+            ]
 
         option_boxes = []
         option_labels = []
 
-        for i, (pos, text) in enumerate(zip(option_positions, difference_options)):
+        for i, (pos, text) in enumerate(zip(option_positions, followup_difference_options)):
             box = visual.Rect(
                 win,
                 width=140,
@@ -629,16 +693,66 @@ for trial_num, trial_type, question_type, variable_type, correct_answer, present
 
         # Draw follow-up question screen
         followup_question.draw()
+        replay_instruction.draw()
+
         for box in option_boxes:
             box.draw()
         for label in option_labels:
             label.draw()
 
+        # Check for keyboard presses (1, 2, 3) to replay sounds
+        keys = event.getKeys()
+        for key in keys:
+            if key == '1':
+                with trial_state_lock:
+                    is_odd = (1 == correct_answer)
+                    audio_key = f"trial_{trial_num}_{'odd' if is_odd else 'control'}"
+                    if audio_key in audio_data:
+                        trial_playback_state['audio'] = audio_data[audio_key].astype(np.float32)
+                        trial_playback_state['pos'] = 0
+                        trial_playback_state['playback_type'] = playback_type
+                        trial_playback_state['is_odd_sound'] = is_odd
+            elif key == '2':
+                with trial_state_lock:
+                    is_odd = (2 == correct_answer)
+                    audio_key = f"trial_{trial_num}_{'odd' if is_odd else 'control'}"
+                    if audio_key in audio_data:
+                        trial_playback_state['audio'] = audio_data[audio_key].astype(np.float32)
+                        trial_playback_state['pos'] = 0
+                        trial_playback_state['playback_type'] = playback_type
+                        trial_playback_state['is_odd_sound'] = is_odd
+            elif key == '3':
+                with trial_state_lock:
+                    is_odd = (3 == correct_answer)
+                    audio_key = f"trial_{trial_num}_{'odd' if is_odd else 'control'}"
+                    if audio_key in audio_data:
+                        trial_playback_state['audio'] = audio_data[audio_key].astype(np.float32)
+                        trial_playback_state['pos'] = 0
+                        trial_playback_state['playback_type'] = playback_type
+                        trial_playback_state['is_odd_sound'] = is_odd
+
         # Check for mouse clicks on options
-        for i, box in enumerate(option_boxes):
-            if mouse.isPressedIn(box):
-                follow_up_response = difference_options[i]
-                selected_difference = i
+        if mouse.isPressedIn(option_boxes[0]):
+            follow_up_response = followup_difference_options[0]
+            selected_difference = 0
+            # Stop audio playback
+            with trial_state_lock:
+                trial_playback_state['audio'] = None
+                trial_playback_state['pos'] = 0
+        elif mouse.isPressedIn(option_boxes[1]):
+            follow_up_response = followup_difference_options[1]
+            selected_difference = 1
+            # Stop audio playback
+            with trial_state_lock:
+                trial_playback_state['audio'] = None
+                trial_playback_state['pos'] = 0
+        elif trial_type == 'practice' and len(option_boxes) > 2 and mouse.isPressedIn(option_boxes[2]):
+            follow_up_response = followup_difference_options[2]
+            selected_difference = 2
+            # Stop audio playback
+            with trial_state_lock:
+                trial_playback_state['audio'] = None
+                trial_playback_state['pos'] = 0
 
         win.flip()
         core.wait(0.05)
@@ -648,8 +762,8 @@ for trial_num, trial_type, question_type, variable_type, correct_answer, present
         'participant_id': participant_num,
         'trial_number': trial_num,
         'trial_type': trial_type,
-        'question_type': question_type,
-        'variable_type': variable_type,
+        'condition': condition,
+        'playback_type': playback_type,
         'correct_answer': correct_answer,
         'participant_response': trial_response,
         'response_time': trial_rt,
